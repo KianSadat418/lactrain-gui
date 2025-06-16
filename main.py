@@ -84,12 +84,16 @@ class MainWindow(QtWidgets.QWidget):
         self.holo_checkbox = QtWidgets.QCheckBox("Show HoloLens Points")
         self.holo_checkbox.setChecked(True)
         self.reset_button = QtWidgets.QPushButton("Reset View")
+        self.zoom_in_button = QtWidgets.QPushButton("Zoom In")
+        self.zoom_out_button = QtWidgets.QPushButton("Zoom Out")
         self.rmse_label = QtWidgets.QLabel("RMSE: N/A")
 
         controls = QtWidgets.QHBoxLayout()
         controls.addWidget(self.cam_checkbox)
         controls.addWidget(self.holo_checkbox)
         controls.addWidget(self.reset_button)
+        controls.addWidget(self.zoom_in_button)
+        controls.addWidget(self.zoom_out_button)
         controls.addStretch()
         controls.addWidget(self.rmse_label)
 
@@ -100,6 +104,8 @@ class MainWindow(QtWidgets.QWidget):
         self.cam_checkbox.stateChanged.connect(self.update_scene)
         self.holo_checkbox.stateChanged.connect(self.update_scene)
         self.reset_button.clicked.connect(self.reset_view)
+        self.zoom_in_button.clicked.connect(self.zoom_in)
+        self.zoom_out_button.clicked.connect(self.zoom_out)
 
         self.receiver = DataReceiver()
         self.receiver.new_pair.connect(self.add_pair)
@@ -136,6 +142,20 @@ class MainWindow(QtWidgets.QWidget):
         self.plotter.reset_camera()
         self.plotter.render()
 
+    def zoom_in(self):
+        """Zoom the view in."""
+        self._zoom(1.2)
+
+    def zoom_out(self):
+        """Zoom the view out."""
+        self._zoom(0.8)
+
+    def _zoom(self, factor: float):
+        camera = self.plotter.camera
+        if hasattr(camera, "Zoom"):
+            camera.Zoom(factor)
+        self.plotter.render()
+
     def update_scene(self):
         self.plotter.clear()
         self.plotter.show_axes()
@@ -167,7 +187,6 @@ class MainWindow(QtWidgets.QWidget):
                 pts = np.array([cam, holo])
                 self.plotter.add_lines(pts, color="green")
 
-        self.plotter.reset_camera()
         self.plotter.render()
 
 
