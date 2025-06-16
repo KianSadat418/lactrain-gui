@@ -77,6 +77,8 @@ class MainWindow(QtWidgets.QWidget):
 
         # UI setup
         self.plotter = QtInteractor(self)
+        self.plotter.show_axes()
+        self.plotter.show_grid(x_label="X (m)", y_label="Y (m)", z_label="Z (m)")
         self.cam_checkbox = QtWidgets.QCheckBox("Show Camera Points")
         self.cam_checkbox.setChecked(True)
         self.holo_checkbox = QtWidgets.QCheckBox("Show HoloLens Points")
@@ -127,6 +129,8 @@ class MainWindow(QtWidgets.QWidget):
 
     def update_scene(self):
         self.plotter.clear()
+        self.plotter.show_axes()
+        self.plotter.show_grid(x_label="X (m)", y_label="Y (m)", z_label="Z (m)")
         if self.camera_points and self.cam_checkbox.isChecked():
             self.plotter.add_points(np.vstack(self.camera_points), color="red", point_size=10,
                                     render_points_as_spheres=True)
