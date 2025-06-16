@@ -78,7 +78,7 @@ class MainWindow(QtWidgets.QWidget):
         # UI setup
         self.plotter = QtInteractor(self)
         self.plotter.show_axes()
-        self.plotter.show_grid(x_label="X (m)", y_label="Y (m)", z_label="Z (m)")
+        self.plotter.show_grid()
         self.cam_checkbox = QtWidgets.QCheckBox("Show Camera Points")
         self.cam_checkbox.setChecked(True)
         self.holo_checkbox = QtWidgets.QCheckBox("Show HoloLens Points")
@@ -130,15 +130,34 @@ class MainWindow(QtWidgets.QWidget):
     def update_scene(self):
         self.plotter.clear()
         self.plotter.show_axes()
-        self.plotter.show_grid(x_label="X (m)", y_label="Y (m)", z_label="Z (m)")
+        self.plotter.show_grid()
         if self.camera_points and self.cam_checkbox.isChecked():
             self.plotter.add_points(np.vstack(self.camera_points), color="red", point_size=10,
                                     render_points_as_spheres=True)
+            self.plotter.add_points(
+                np.vstack(self.camera_points),
+                color="red",
+                point_size=15,
+                render_points_as_spheres=True,
+            )
         if self.holo_points and self.holo_checkbox.isChecked():
             self.plotter.add_points(np.vstack(self.holo_points), color="blue", point_size=10,
                                     render_points_as_spheres=True)
         # Draw lines between pairs
         if self.camera_points and self.holo_points:
+            self.plotter.add_points(
+                np.vstack(self.holo_points),
+                color="blue",
+                point_size=15,
+                render_points_as_spheres=True,
+            )
+        # Draw lines between pairs only if both sets are visible
+        if (
+            self.camera_points
+            and self.holo_points
+            and self.cam_checkbox.isChecked()
+            and self.holo_checkbox.isChecked()
+        ):
             for cam, holo in zip(self.camera_points, self.holo_points):
                 pts = np.array([cam, holo])
                 self.plotter.add_lines(pts, color="green")
