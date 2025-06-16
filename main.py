@@ -83,11 +83,13 @@ class MainWindow(QtWidgets.QWidget):
         self.cam_checkbox.setChecked(True)
         self.holo_checkbox = QtWidgets.QCheckBox("Show HoloLens Points")
         self.holo_checkbox.setChecked(True)
+        self.reset_button = QtWidgets.QPushButton("Reset View")
         self.rmse_label = QtWidgets.QLabel("RMSE: N/A")
 
         controls = QtWidgets.QHBoxLayout()
         controls.addWidget(self.cam_checkbox)
         controls.addWidget(self.holo_checkbox)
+        controls.addWidget(self.reset_button)
         controls.addStretch()
         controls.addWidget(self.rmse_label)
 
@@ -97,6 +99,7 @@ class MainWindow(QtWidgets.QWidget):
 
         self.cam_checkbox.stateChanged.connect(self.update_scene)
         self.holo_checkbox.stateChanged.connect(self.update_scene)
+        self.reset_button.clicked.connect(self.reset_view)
 
         self.receiver = DataReceiver()
         self.receiver.new_pair.connect(self.add_pair)
@@ -127,31 +130,33 @@ class MainWindow(QtWidgets.QWidget):
         rmse = np.sqrt(np.mean(np.sum(diff * diff, axis=1)))
         self.rmse_label.setText(f"RMSE: {rmse:.4f}")
 
+    def reset_view(self):
+        """Reset camera orientation with Z axis pointing up."""
+        self.plotter.view_isometric()
+        self.plotter.reset_camera()
+        self.plotter.render()
+
     def update_scene(self):
         self.plotter.clear()
         self.plotter.show_axes()
         self.plotter.show_grid()
+
         if self.camera_points and self.cam_checkbox.isChecked():
-            self.plotter.add_points(np.vstack(self.camera_points), color="red", point_size=10,
-                                    render_points_as_spheres=True)
             self.plotter.add_points(
                 np.vstack(self.camera_points),
                 color="red",
-                point_size=15,
+                point_size=10,
                 render_points_as_spheres=True,
             )
+
         if self.holo_points and self.holo_checkbox.isChecked():
-            self.plotter.add_points(np.vstack(self.holo_points), color="blue", point_size=10,
-                                    render_points_as_spheres=True)
-        # Draw lines between pairs
-        if self.camera_points and self.holo_points:
             self.plotter.add_points(
                 np.vstack(self.holo_points),
                 color="blue",
-                point_size=15,
+                point_size=10,
                 render_points_as_spheres=True,
             )
-        # Draw lines between pairs only if both sets are visible
+
         if (
             self.camera_points
             and self.holo_points
@@ -161,6 +166,7 @@ class MainWindow(QtWidgets.QWidget):
             for cam, holo in zip(self.camera_points, self.holo_points):
                 pts = np.array([cam, holo])
                 self.plotter.add_lines(pts, color="green")
+
         self.plotter.reset_camera()
         self.plotter.render()
 
