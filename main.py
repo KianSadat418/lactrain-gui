@@ -108,6 +108,7 @@ class MainWindow(QtWidgets.QWidget):
         transform_group = QtWidgets.QGroupBox("Transform")
         transform_layout = QtWidgets.QVBoxLayout()
         self.transform_checkbox = QtWidgets.QCheckBox("Show Transform Point")
+        self.transform_checkbox.setChecked(True)
         fields_layout = QtWidgets.QHBoxLayout()
         self.transform_x = QtWidgets.QLineEdit()
         self.transform_x.setPlaceholderText("X")
