@@ -28,11 +28,16 @@ class DataReceiver(QtCore.QThread):
 
     def run(self):
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect((self.host, self.port))
-            fileobj = sock.makefile()
-        except OSError:
-            # Socket unavailable; switch to synthetic data mode
+            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server_socket.bind((self.host, self.port))
+            server_socket.listen(1)
+            print(f"[Receiver] Listening on {self.host}:{self.port}...")
+            conn, _ = server_socket.accept()
+            print("[Receiver] Connection established.")
+            fileobj = conn.makefile()
+        except Exception as e:
+            print(f"[Receiver] Failed to start server: {e}")
             self.test_mode = True
 
         if self.test_mode:
@@ -54,7 +59,9 @@ class DataReceiver(QtCore.QThread):
             cam = np.array(nums[:3])
             holo = np.array(nums[3:])
             self.new_pair.emit(cam, holo)
-        sock.close()
+
+        conn.close()
+        server_socket.close()
 
     def _run_test_mode(self):
         rng = np.random.default_rng()
