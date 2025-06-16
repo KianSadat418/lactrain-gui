@@ -5,7 +5,8 @@ import time
 from typing import List
 
 import numpy as np
-from PyQt5 import QtCore, QtWidgets
+import PyQt5.QtCore as QtCore
+import PyQt5.QtWidgets as QtWidgets
 import pyvista as pv
 from pyvistaqt import QtInteractor
 
@@ -84,8 +85,8 @@ class MainWindow(QtWidgets.QWidget):
         self.holo_checkbox = QtWidgets.QCheckBox("Show HoloLens Points")
         self.holo_checkbox.setChecked(True)
         self.reset_button = QtWidgets.QPushButton("Reset View")
-        self.zoom_in_button = QtWidgets.QPushButton("Zoom In")
-        self.zoom_out_button = QtWidgets.QPushButton("Zoom Out")
+        self.zoom_in_button = QtWidgets.QPushButton("+")
+        self.zoom_out_button = QtWidgets.QPushButton("-")
         self.rmse_label = QtWidgets.QLabel("RMSE: N/A")
 
         controls = QtWidgets.QHBoxLayout()
@@ -165,7 +166,7 @@ class MainWindow(QtWidgets.QWidget):
             self.plotter.add_points(
                 np.vstack(self.camera_points),
                 color="red",
-                point_size=10,
+                point_size=12,
                 render_points_as_spheres=True,
             )
 
@@ -173,7 +174,7 @@ class MainWindow(QtWidgets.QWidget):
             self.plotter.add_points(
                 np.vstack(self.holo_points),
                 color="blue",
-                point_size=10,
+                point_size=12,
                 render_points_as_spheres=True,
             )
 
