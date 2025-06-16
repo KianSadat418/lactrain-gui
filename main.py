@@ -82,6 +82,7 @@ class MainWindow(QtWidgets.QWidget):
         # Data storage
         self.camera_points: List[np.ndarray] = []
         self.holo_points: List[np.ndarray] = []
+        self.transform_points: List[np.ndarray] = []
 
         # UI setup
         self.plotter = QtInteractor(self)
@@ -103,6 +104,29 @@ class MainWindow(QtWidgets.QWidget):
         options_layout.addWidget(self.holo_checkbox)
         options_group.setLayout(options_layout)
 
+        # Transform configuration
+        transform_group = QtWidgets.QGroupBox("Transform")
+        transform_layout = QtWidgets.QVBoxLayout()
+        self.transform_checkbox = QtWidgets.QCheckBox("Show Transform Point")
+        fields_layout = QtWidgets.QHBoxLayout()
+        self.transform_x = QtWidgets.QLineEdit()
+        self.transform_x.setPlaceholderText("X")
+        self.transform_x.setMaximumWidth(50)
+        self.transform_y = QtWidgets.QLineEdit()
+        self.transform_y.setPlaceholderText("Y")
+        self.transform_y.setMaximumWidth(50)
+        self.transform_z = QtWidgets.QLineEdit()
+        self.transform_z.setPlaceholderText("Z")
+        self.transform_z.setMaximumWidth(50)
+        fields_layout.addWidget(self.transform_x)
+        fields_layout.addWidget(self.transform_y)
+        fields_layout.addWidget(self.transform_z)
+        self.transform_apply = QtWidgets.QPushButton("Apply")
+        transform_layout.addWidget(self.transform_checkbox)
+        transform_layout.addLayout(fields_layout)
+        transform_layout.addWidget(self.transform_apply)
+        transform_group.setLayout(transform_layout)
+
         view_group = QtWidgets.QGroupBox("View")
         view_layout = QtWidgets.QHBoxLayout()
         view_layout.addWidget(self.reset_button)
@@ -112,6 +136,7 @@ class MainWindow(QtWidgets.QWidget):
 
         right_layout = QtWidgets.QVBoxLayout()
         right_layout.addWidget(options_group)
+        right_layout.addWidget(transform_group)
         right_layout.addWidget(view_group)
         right_layout.addStretch()
         right_layout.addWidget(self.rmse_label)
@@ -122,9 +147,11 @@ class MainWindow(QtWidgets.QWidget):
 
         self.cam_checkbox.stateChanged.connect(self.update_scene)
         self.holo_checkbox.stateChanged.connect(self.update_scene)
+        self.transform_checkbox.stateChanged.connect(self.update_scene)
         self.reset_button.clicked.connect(self.reset_view)
         self.zoom_in_button.clicked.connect(self.zoom_in)
         self.zoom_out_button.clicked.connect(self.zoom_out)
+        self.transform_apply.clicked.connect(self.apply_transform)
 
         self.receiver = DataReceiver()
         self.receiver.new_pair.connect(self.add_pair)
@@ -169,6 +196,18 @@ class MainWindow(QtWidgets.QWidget):
         """Zoom the view out."""
         self._zoom(0.8)
 
+    def apply_transform(self):
+        """Read transform point from fields and store it."""
+        try:
+            x = float(self.transform_x.text())
+            y = float(self.transform_y.text())
+            z = float(self.transform_z.text())
+        except ValueError:
+            return
+        self.transform_points.append(np.array([x, y, z]))
+        self.transform_points = self.transform_points[-12:]
+        self.update_scene()
+
     def _zoom(self, factor: float):
         camera = self.plotter.camera
         if hasattr(camera, "Zoom"):
@@ -199,6 +238,14 @@ class MainWindow(QtWidgets.QWidget):
                 np.vstack(self.holo_points),
                 color="blue",
                 point_size=14,
+                render_points_as_spheres=True,
+            )
+
+        if self.transform_points and self.transform_checkbox.isChecked():
+            self.plotter.add_points(
+                np.vstack(self.transform_points),
+                color="green",
+                point_size=18,
                 render_points_as_spheres=True,
             )
 
