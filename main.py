@@ -175,6 +175,12 @@ class MainWindow(QtWidgets.QWidget):
             camera.Zoom(factor)
         self.plotter.render()
 
+    def draw_dashed_line(self, p1, p2, segments=12):
+        points = np.linspace(p1, p2, segments * 2).reshape(-1, 2, 3)
+        for i, (start, end) in enumerate(points):
+            if i % 2 == 0:
+                self.plotter.add_lines(np.array([start, end]), color="gray", width=4)
+
     def update_scene(self):
         self.plotter.clear()
         self.plotter.show_axes()
@@ -184,7 +190,7 @@ class MainWindow(QtWidgets.QWidget):
             self.plotter.add_points(
                 np.vstack(self.camera_points),
                 color="red",
-                point_size=12,
+                point_size=14,
                 render_points_as_spheres=True,
             )
 
@@ -192,7 +198,7 @@ class MainWindow(QtWidgets.QWidget):
             self.plotter.add_points(
                 np.vstack(self.holo_points),
                 color="blue",
-                point_size=12,
+                point_size=14,
                 render_points_as_spheres=True,
             )
 
@@ -203,8 +209,7 @@ class MainWindow(QtWidgets.QWidget):
             and self.holo_checkbox.isChecked()
         ):
             for cam, holo in zip(self.camera_points, self.holo_points):
-                pts = np.array([cam, holo])
-                self.plotter.add_lines(pts, color="green")
+                self.draw_dashed_line(cam, holo)
 
         self.plotter.render()
 
