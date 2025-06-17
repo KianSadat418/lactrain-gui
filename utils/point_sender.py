@@ -12,7 +12,7 @@ def main():
     PORT = 50007
 
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.connect((HOST, PORT))
         print(f"Connected to GUI at {HOST}:{PORT}")
         print("Press [Enter] to send a new point pair. Press Ctrl+C to exit.")

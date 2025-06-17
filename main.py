@@ -30,13 +30,7 @@ class DataReceiver(QtCore.QThread):
     def run(self):
         try:
             server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            #server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             server_socket.bind((self.host, self.port))
-            #server_socket.listen(1)
-            #print(f"[Receiver] Listening on {self.host}:{self.port}...")
-            #conn, _ = server_socket.accept()
-            #print("[Receiver] Connection established.")
-            #fileobj = conn.makefile()
         except Exception as e:
             print(f"[Receiver] Failed to start server: {e}")
             self.test_mode = True
@@ -48,7 +42,6 @@ class DataReceiver(QtCore.QThread):
         added_idx = []
         while self._running:
             try:
-                #line = fileobj.readline()
                 data, addr = server_socket.recvfrom(650000)
                 if not data:
                     continue
@@ -66,9 +59,6 @@ class DataReceiver(QtCore.QThread):
             except Exception as e:
                 print(f"[Receiver] Error receiving data: {e}")
                 break
-
-        #conn.close()
-        #server_socket.close()
 
     def _run_test_mode(self):
         rng = np.random.default_rng()
