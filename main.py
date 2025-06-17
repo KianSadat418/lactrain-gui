@@ -1,5 +1,6 @@
 import sys
 import socket
+import json
 import random
 import time
 from typing import List
@@ -44,21 +45,24 @@ class DataReceiver(QtCore.QThread):
             self._run_test_mode()
             return
 
+        added_idx = []
         while self._running:
-            line = fileobj.readline()
-            if not line:
-                time.sleep(0.1)
-                continue
-            parts = line.strip().split()
-            if len(parts) != 6:
-                continue
             try:
-                nums = list(map(float, parts))
-            except ValueError:
+                line = fileobj.readline()
+                if not line:
+                    continue
+                data = json.loads(line)
+                for key, value in data.items():
+                    if key not in added_idx:
+                        added_idx.append(key)
+                        cam = np.array(value[0])
+                        holo = np.array(value[1])
+                        self.new_pair.emit(cam, holo)
+            except json.JSONDecodeError:
                 continue
-            cam = np.array(nums[:3])
-            holo = np.array(nums[3:])
-            self.new_pair.emit(cam, holo)
+            except Exception as e:
+                print(f"[Receiver] Error receiving data: {e}")
+                break
 
         conn.close()
         server_socket.close()
