@@ -2,17 +2,15 @@ import sys
 import socket
 import json
 from typing import List
-
 import numpy as np
+
 import PyQt5.QtCore as QtCore
 import PyQt5.QtWidgets as QtWidgets
+import pyvista as pv
 from pyvistaqt import QtInteractor
 
 
 class DataReceiver(QtCore.QThread):
-    """Thread that receives point pairs from a socket or generates synthetic data."""
-
-
     updated_points = QtCore.pyqtSignal(list, list)
 
     def __init__(self, host: str = "0.0.0.0", port: int = 9991, parent=None):
@@ -41,6 +39,15 @@ class DataReceiver(QtCore.QThread):
                     QtCore.QMetaObject.invokeMethod(
                         self.parent(), "trigger_matrix_mode", QtCore.Qt.QueuedConnection
                     )
+                elif line.startswith("G"):
+                    try:
+                        gaze_data = json.loads(line[1:])
+                        QtCore.QMetaObject.invokeMethod(
+                            self.parent(), "recieve_gaze_data", QtCore.Qt.QueuedConnection,
+                            QtCore.Q_ARG(dict, gaze_data)
+                        )
+                    except Exception as e:
+                        print(f"[Receiver] Error parsing gaze data: {e}")
                 else:
                     data = json.loads(line)
                     camera_points = []
@@ -101,6 +108,51 @@ class MatrixInfoWindow(QtWidgets.QWidget):
         self.setLayout(layout)
 
 
+class GazeTrackingWindow(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Gaze Tracking")
+        self.setMinimumSize(600, 400)
+        self.plotter = QtInteractor(self)
+
+        layout = QtWidgets.QVBoxLayout()
+        label = QtWidgets.QLabel("Gaze Tracking Interface")
+
+        label.setAlignment(QtCore.Qt.AlignCenter)
+        layout.addWidget(self.plotter.interactor)
+        layout.addWidget(label)
+
+        self.setLayout(layout)
+
+        self.plotter.show_axes()
+        self.plotter.show_grid()
+
+    def update_gaze_visual(self, gaze_data: dict):
+        try:
+            self.plotter.clear()
+            self.plotter.show_axes()
+            self.plotter.show_grid()
+
+            gaze_line = np.array(gaze_data["gaze_line"])
+            self.plotter.add_lines(gaze_line, color="green", width=3)
+
+
+            roi_center = np.array(gaze_data["roi"][0])
+            roi_radius = float(gaze_data["roi"][1])
+            roi_disc = pv.Disc(center=roi_center, inner=0, outer=roi_radius, normal=(0, 0, 1), r_res=1, c_res=100)
+            self.plotter.add_mesh(roi_disc, color="yellow", opacity=0.5, show_edges=True)
+
+            pegs = np.array(gaze_data["pegs"])
+            self.plotter.add_points(pegs, color="blue", point_size=12, render_points_as_spheres=True)
+
+            if gaze_data.get("intercept", False):
+                self.plotter.add_text("ROI INTERCEPT", position="upper_left", font_size=14, color="red")
+
+            self.plotter.render()
+        except Exception as e:
+            print(f"[GazeTrackingWindow] Failed to update visual: {e}")
+
+
 class MainWindow(QtWidgets.QWidget):
     """Main application window."""
     trigger_matrix_mode = QtCore.pyqtSignal()
@@ -135,6 +187,8 @@ class MainWindow(QtWidgets.QWidget):
         options_layout.addWidget(self.cam_checkbox)
         options_layout.addWidget(self.holo_checkbox)
         options_group.setLayout(options_layout)
+        gaze_group = QtWidgets.QGroupBox("Gaze Tracking")
+        gaze_layout = QtWidgets.QVBoxLayout()
 
         # Transform configuration
         transform_group = QtWidgets.QGroupBox("Transform")
@@ -185,6 +239,10 @@ class MainWindow(QtWidgets.QWidget):
         right_layout.addWidget(transform_group)
         right_layout.addWidget(view_group)
         right_layout.addStretch()
+        self.launch_gaze_button = QtWidgets.QPushButton("Launch Gaze Tracking")
+        gaze_layout.addWidget(self.launch_gaze_button)
+        gaze_group.setLayout(gaze_layout)
+        right_layout.addWidget(gaze_group)
         right_layout.addWidget(self.rmse_label)
 
         layout = QtWidgets.QHBoxLayout(self)
@@ -199,6 +257,7 @@ class MainWindow(QtWidgets.QWidget):
         self.zoom_out_button.clicked.connect(self.zoom_out)
         self.transform_apply.clicked.connect(self.apply_transform)
         self.matrix_apply_button.clicked.connect(self.apply_matrix_transform)
+        self.launch_gaze_button.clicked.connect(self.open_gaze_tracking)
 
         self.receiver = DataReceiver(parent=self)
         self.receiver.updated_points.connect(self.set_all_pairs)
@@ -215,6 +274,11 @@ class MainWindow(QtWidgets.QWidget):
         self.holo_points = holo_points
         self.update_rmse()
         self.update_scene()
+
+    @QtCore.pyqtSlot(dict)
+    def receive_gaze_data(self, gaze_data: dict):
+        if hasattr(self, "gaze_window") and self.gaze_window:
+            self.gaze_window.update_gaze_visual(gaze_data)
 
     def update_rmse(self):
         if not self.camera_points:
@@ -318,6 +382,11 @@ class MainWindow(QtWidgets.QWidget):
         if hasattr(camera, "Zoom"):
             camera.Zoom(factor)
         self.plotter.render()
+
+    def open_gaze_tracking(self):
+        print("[MainWindow] Launching gaze tracking window...")
+        self.gaze_window = GazeTrackingWindow()
+        self.gaze_window.show()
 
     def draw_dashed_line(self, p1, p2, segments=30):
         points = np.linspace(p1, p2, segments * 2).reshape(-1, 2, 3)
