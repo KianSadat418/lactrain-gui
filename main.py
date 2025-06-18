@@ -38,16 +38,22 @@ class DataReceiver(QtCore.QThread):
                 data, addr = server_socket.recvfrom(650000)
                 if not data:
                     continue
-                line = data.decode('utf-8')
-                data = json.loads(line)
-                camera_points = []
-                holo_points = []
-                for key, value in data.items():
-                    cam = np.array(value[0])
-                    holo = np.array(value[1])
-                    camera_points.append(cam)
-                    holo_points.append(holo)
-                self.updated_points.emit(camera_points, holo_points)
+                line = data.decode('utf-8').strip()
+
+                if line.startswith("M"):
+                    payload = line[1:]
+                    data = json.loads(payload)
+                    self.parent().handle_matrix_mode(data)
+                else:
+                    data = json.loads(line)
+                    camera_points = []
+                    holo_points = []
+                    for key, value in data.items():
+                        cam = np.array(value[0])
+                        holo = np.array(value[1])
+                        camera_points.append(cam)
+                        holo_points.append(holo)
+                    self.updated_points.emit(camera_points, holo_points)
             except json.JSONDecodeError:
                 continue
             except Exception as e:
@@ -66,6 +72,7 @@ class MainWindow(QtWidgets.QWidget):
         self.camera_points: List[np.ndarray] = []
         self.holo_points: List[np.ndarray] = []
         self.transform_points: List[np.ndarray] = []
+        self.transform_matrices = []
 
         # UI setup
         self.plotter = QtInteractor(self)
@@ -107,6 +114,19 @@ class MainWindow(QtWidgets.QWidget):
         fields_layout.addWidget(self.transform_z)
         self.transform_apply = QtWidgets.QPushButton("Apply")
         transform_layout.addWidget(self.transform_checkbox)
+
+        self.matrix_buttons = []
+        self.matrix_group = QtWidgets.QButtonGroup()
+        for i in range(4):
+            btn = QtWidgets.QRadioButton(f"Matrix {i + 1}")
+            self.matrix_buttons.append(btn)
+            self.matrix_group.addButton(btn, i)
+            transform_layout.addWidget(btn)
+        self.matrix_buttons[0].setChecked(True)
+
+        self.matrix_apply_button = QtWidgets.QPushButton("Transform")
+        transform_layout.addWidget(self.matrix_apply_button)
+
         transform_layout.addLayout(fields_layout)
         transform_layout.addWidget(self.transform_apply)
         transform_group.setLayout(transform_layout)
@@ -136,8 +156,9 @@ class MainWindow(QtWidgets.QWidget):
         self.zoom_in_button.clicked.connect(self.zoom_in)
         self.zoom_out_button.clicked.connect(self.zoom_out)
         self.transform_apply.clicked.connect(self.apply_transform)
+        self.matrix_apply_button.clicked.connect(self.apply_matrix_transform)
 
-        self.receiver = DataReceiver()
+        self.receiver = DataReceiver(parent=self)
         self.receiver.updated_points.connect(self.set_all_pairs)
         self.receiver.start()
 
@@ -176,6 +197,32 @@ class MainWindow(QtWidgets.QWidget):
     def zoom_out(self):
         """Zoom the view out."""
         self._zoom(0.8)
+
+    def handle_matrix_mode(self, data):
+        matrix_path = "path/to/matrix/file.txt"
+        try:
+            with open(matrix_path, "r") as f:
+                lines = [line.strip() for line in f.readlines() if line.strip()]
+            assert len(lines) == 4
+            self.transform_matrices = [np.fromstring(l, sep=' ').reshape(4, 4) for l in lines]
+            print("[MainWindow] Loaded 4 transformation matrices.")
+        except Exception as e:
+            print(f"[MainWindow] Failed to load transformation matrices: {e}")
+
+    def apply_matrix_transform(self):
+        idx = self.matrix_group.checkedId()
+        if idx < 0 or idx >= len(self.transform_matrices):
+            print("[MainWindow] Invalid matrix index selected.")
+            return
+        matrix = self.transform_matrices[idx]
+        transformed = []
+        for pt in self.camera_points:
+            pt_h = np.append(pt, 1.0)
+            new_pt = matrix @ pt_h
+            transformed.append(new_pt[:3])
+        self.transform_points.extend(transformed)
+        self.transform_points = self.transform_points[-12:]
+        self.update_scene()
 
     def apply_transform(self):
         """Read transform point from fields and store it."""
