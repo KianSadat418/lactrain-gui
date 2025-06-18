@@ -177,8 +177,8 @@ class MainWindow(QtWidgets.QWidget):
         self.camera_points: List[np.ndarray] = []
         self.holo_points: List[np.ndarray] = []
         self.transform_points: List[np.ndarray] = []
+        self.virtual_transform_point = None
         self.transform_matrices = []
-        self.peg_validation_point = None
 
         # UI setup
         self.plotter = QtInteractor(self)
