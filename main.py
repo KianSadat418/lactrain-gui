@@ -39,6 +39,17 @@ class DataReceiver(QtCore.QThread):
                     QtCore.QMetaObject.invokeMethod(
                         self.parent(), "trigger_matrix_mode", QtCore.Qt.QueuedConnection
                     )
+                elif line.startswith("V"):
+                    try:
+                        v_data = json.loads(line[1:])
+                        QtCore.QMetaObject.invokeMethod(
+                            self.parent(),
+                            "receive_virtual_transform",
+                            QtCore.Qt.QueuedConnection,
+                            QtCore.Q_ARG(dict, v_data),
+                        )
+                    except Exception as e:
+                        print(f"[Receiver] Error parsing virtual transform data: {e}")
                 elif line.startswith("G"):
                     try:
                         gaze_data = json.loads(line[1:])
@@ -167,6 +178,7 @@ class MainWindow(QtWidgets.QWidget):
         self.holo_points: List[np.ndarray] = []
         self.transform_points: List[np.ndarray] = []
         self.transform_matrices = []
+        self.peg_validation_point = None
 
         # UI setup
         self.plotter = QtInteractor(self)
@@ -279,6 +291,15 @@ class MainWindow(QtWidgets.QWidget):
     def receive_gaze_data(self, gaze_data: dict):
         if hasattr(self, "gaze_window") and self.gaze_window:
             self.gaze_window.update_gaze_visual(gaze_data)
+
+    def receive_virtual_transform(self, data: dict):
+        try:
+            self.virtual_transform_point = np.array([
+                float(data["x"]), float(data["y"]), float(data["z"])
+            ])
+            self.update_scene()
+        except Exception as e:
+            print(f"[MainWindow] Error handling virtual transform data: {e}")
 
     def update_rmse(self):
         if not self.camera_points:
@@ -421,6 +442,14 @@ class MainWindow(QtWidgets.QWidget):
             self.plotter.add_points(
                 np.vstack(self.transform_points),
                 color="green",
+                point_size=14,
+                render_points_as_spheres=True,
+            )
+
+        if self.virtual_transform_point is not None and self.transform_checkbox.isChecked():
+            self.plotter.add_points(
+                self.virtual_transform_point.reshape(1, 3),
+                color="purple",
                 point_size=14,
                 render_points_as_spheres=True,
             )
