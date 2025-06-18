@@ -199,15 +199,24 @@ class MainWindow(QtWidgets.QWidget):
         self._zoom(0.8)
 
     def handle_matrix_mode(self, data):
-        matrix_path = "path/to/matrix/file.txt"
+        matrix_path = "transform_data.txt"
         try:
             with open(matrix_path, "r") as f:
-                lines = [line.strip() for line in f.readlines() if line.strip()]
-            assert len(lines) == 4
-            self.transform_matrices = [np.fromstring(l, sep=' ').reshape(4, 4) for l in lines]
-            print("[MainWindow] Loaded 4 transformation matrices.")
+                matrix_json =json.load(f)
+            required_keys = ["similarity_transform", "affine_transform", "similarity_transform_ransac", "affine_transform_ransac"]
+            self.transform_matrices = []
+            for key in required_keys:
+                if key not in required_keys:
+                    raise ValueError(f"Missing required key: {key}")
+                matrix_data = matrix_json[key]
+                if len(matrix_data) != 16:
+                    raise ValueError(f"{key} must have 16 elements.")
+                matrix = np.array(matrix_data).reshape(4, 4)
+                self.transform_matrices.append(matrix)
+            print("[MainWindow] Transform matrices loaded successfully.")
         except Exception as e:
-            print(f"[MainWindow] Failed to load transformation matrices: {e}")
+            QtWidgets.QMessageBox.warning(self, "Matrix Load Failed", str(e))
+            print(f"[MainWindow] Error loading matrices: {e}")
 
     def apply_matrix_transform(self):
         idx = self.matrix_group.checkedId()
