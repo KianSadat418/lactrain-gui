@@ -75,7 +75,11 @@ class MatrixInfoWindow(QtWidgets.QWidget):
         table.setRowCount(len(point_rows))
         for i, row in enumerate(point_rows):
             for j, val in enumerate(row):
-                table.setItem(i, j, QtWidgets.QTableWidgetItem(str(val)))
+                if isinstance(val, (list, tuple)) and len(val) == 3:
+                    formatted = f"({val[0]:.3f}, {val[1]:.3f}, {val[2]:.3f})"
+                else:
+                    formatted = f"{val:.4f}" if isinstance(val, (float, int)) else str(val)
+                table.setItem(i, j, QtWidgets.QTableWidgetItem(formatted))
         layout.addWidget(table)
 
         # Matrices and RMSE
@@ -248,10 +252,24 @@ class MainWindow(QtWidgets.QWidget):
                 matrix = np.array(matrix_data).reshape(4, 4)
                 self.transform_matrices.append(matrix)
 
-            point_rows = matrix_json.get("rows", [])
             rmse_values = matrix_json.get("rmse", [0, 0, 0, 0])
-            if not point_rows:
-                raise ValueError("No point rows found in matrix data.")
+            row_dict = matrix_json.get("rows", {})
+            num_rows = len(row_dict.get("Camera", []))
+            point_rows = []
+            for i in range(num_rows):
+                row = [
+                    row_dict["Camera"][i],
+                    row_dict["Hololens"][i],
+                    row_dict["similarity_transformed_B"][i],
+                    row_dict["similarity_transform_errors"][i],
+                    row_dict["affine_transformed_B"][i],
+                    row_dict["affine_transform_errors"][i],
+                    row_dict["similarity_transformed_ransac_B"][i],
+                    row_dict["similarity_transform_ransac_errors"][i],
+                    row_dict["affine_transformed_ransac_B"][i],
+                    row_dict["affine_transform_ransac_errors"][i],
+                ]
+                point_rows.append(row)
             
             self.matrix_info_window = MatrixInfoWindow(self.transform_matrices, point_rows, rmse_values, self)
             self.matrix_info_window.show()
