@@ -1,370 +1,179 @@
-import sys
+import cv2
+import numpy as np
+import os
 import socket
 import json
-from typing import List
+import struct
 
-import numpy as np
-import PyQt5.QtCore as QtCore
-import PyQt5.QtWidgets as QtWidgets
-from pyvistaqt import QtInteractor
+OUTPUT_PORT = 9990
+UNITY_LEFT_PORT = 9998
+UNITY_RIGHT_PORT = 9999
+OUTPUT_IP = "127.0.0.1"
 
+left_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+right_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+output_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-class DataReceiver(QtCore.QThread):
-    """Thread that receives point pairs from a socket or generates synthetic data."""
+cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1600)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 600)
 
-    updated_points = QtCore.pyqtSignal(list, list)
+image_size = (800, 600)
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 9991, parent=None):
-        super().__init__(parent)
-        self.host = host
-        self.port = port
-        self._running = True
+# === Load stereo calibration ===
+calib = np.load("Assets/Scripts/Camera Calibration/stereo_camera_calibration2.npz")
+K1, D1 = calib["cameraMatrixL"], calib["distL"]
+K2, D2 = calib["cameraMatrixR"], calib["distR"]
+R, T = calib["R"], calib["T"]
 
-    def stop(self):
-        self._running = False
+CHUNK_SIZE = 30000
+count = 0
 
-    def run(self):
-        try:
-            server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            server_socket.bind((self.host, self.port))
-        except Exception as e:
-            print(f"[Receiver] Failed to start server: {e}")
+SELECTED_MARKERS = [1, 3, 5, 7, 9, 10, 12, 14, 16, 18, 19, 21, 23, 25, 27, 31, 33, 35, 37, 39]
 
-        while self._running:
-            try:
-                data, addr = server_socket.recvfrom(650000)
-                if not data:
-                    continue
-                line = data.decode('utf-8').strip()
-                if line.startswith("M"):
-                    self.parent().handle_matrix_mode()
-                else:
-                    data = json.loads(line)
-                    camera_points = []
-                    holo_points = []
-                    for key, value in data.items():
-                        cam = np.array(value[0])
-                        holo = np.array(value[1])
-                        camera_points.append(cam)
-                        holo_points.append(holo)
-                    self.updated_points.emit(camera_points, holo_points)
-            except json.JSONDecodeError:
-                continue
-            except Exception as e:
-                print(f"[Receiver] Error receiving data: {e}")
-                break
+def send_frame_left(frame, frame_id=0):
+    _, buffer = cv2.imencode(".jpg", frame)
+    data = buffer.tobytes()
 
+    total_chunks = (len(data) + CHUNK_SIZE - 1) // CHUNK_SIZE
 
-class MatrixInfoWindow(QtWidgets.QWidget):
-    def __init__(self, matrix_data, point_rows, rmse_values, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Transformation Matrix Info")
-        self.setMinimumWidth(1000)
-        layout = QtWidgets.QVBoxLayout()
+    header = struct.pack('!II', frame_id, total_chunks)
+    left_sock.sendto(b'H' + header, (OUTPUT_IP, UNITY_LEFT_PORT))
 
-        # Table setup
-        table = QtWidgets.QTableWidget()
-        table.setColumnCount(10)
-        table.setHorizontalHeaderLabels([
-            "Camera", "HoloLens",
-            "Sim Xform", "Sim Error",
-            "Affine Xform", "Affine Error",
-            "Sim RANSAC", "Sim RANSAC Error",
-            "Affine RANSAC", "Affine RANSAC Error"
-        ])
-        table.setRowCount(len(point_rows))
-        for i, row in enumerate(point_rows):
-            for j, val in enumerate(row):
-                if isinstance(val, (list, tuple)) and len(val) == 3:
-                    formatted = f"({val[0]:.3f}, {val[1]:.3f}, {val[2]:.3f})"
-                else:
-                    formatted = f"{val:.4f}" if isinstance(val, (float, int)) else str(val)
-                table.setItem(i, j, QtWidgets.QTableWidgetItem(formatted))
-        layout.addWidget(table)
+    for i in range(total_chunks):
+        chunk_data = data[i*CHUNK_SIZE:(i+1)*CHUNK_SIZE]
+        chunk_header = struct.pack('!II', frame_id, i)
+        left_sock.sendto(b'D' + chunk_header + chunk_data, (OUTPUT_IP, UNITY_LEFT_PORT))
 
-        # Matrices and RMSE
-        matrix_layout = QtWidgets.QFormLayout()
-        for name, mat, rmse in zip(
-            ["Similarity", "Affine", "Similarity RANSAC", "Affine RANSAC"],
-            matrix_data,
-            rmse_values
-        ):
-            mat_str = "\n".join("  ".join(f"{v:.4f}" for v in row) for row in mat)
-            matrix_label = QtWidgets.QLabel(f"<pre>{mat_str}</pre>")
-            matrix_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-            matrix_layout.addRow(f"{name} Matrix (RMSE: {rmse:.4f})", matrix_label)
+def send_frame_right(frame, frame_id=0):
+    _, buffer = cv2.imencode(".jpg", frame)
+    data = buffer.tobytes()
 
-        layout.addLayout(matrix_layout)
-        self.setLayout(layout)
+    total_chunks = (len(data) + CHUNK_SIZE - 1) // CHUNK_SIZE
 
+    header = struct.pack('!II', frame_id, total_chunks)
+    right_sock.sendto(b'H' + header, (OUTPUT_IP, UNITY_RIGHT_PORT))
 
-class MainWindow(QtWidgets.QWidget):
-    """Main application window."""
+    for i in range(total_chunks):
+        chunk_data = data[i*CHUNK_SIZE:(i+1)*CHUNK_SIZE]
+        chunk_header = struct.pack('!II', frame_id, i)
+        right_sock.sendto(b'D' + chunk_header + chunk_data, (OUTPUT_IP, UNITY_RIGHT_PORT))
 
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Real-Time Point Viewer")
+    
+def triangulate_3D(P1, P2, ptL, ptR):
+    pt_4d = cv2.triangulatePoints(P1, P2, ptL, ptR)
+    pt_3d = pt_4d[:3] / pt_4d[3]
+    return pt_3d.ravel()
 
-        # Data storage
-        self.camera_points: List[np.ndarray] = []
-        self.holo_points: List[np.ndarray] = []
-        self.transform_points: List[np.ndarray] = []
-        self.transform_matrices = []
+def find_checkered_pattern(right_frame, left_frame):
+    markersIn3D = {}
+    all_markers_count = 0
+    Selected_markers_count = 0
 
-        # UI setup
-        self.plotter = QtInteractor(self)
-        self.plotter.show_axes()
-        self.plotter.show_grid()
-        self.cam_checkbox = QtWidgets.QCheckBox("Show Camera Points")
-        self.cam_checkbox.setChecked(True)
-        self.holo_checkbox = QtWidgets.QCheckBox("Show HoloLens Points")
-        self.holo_checkbox.setChecked(True)
-        self.reset_button = QtWidgets.QPushButton("Reset View")
-        self.zoom_in_button = QtWidgets.QPushButton("+")
-        self.zoom_out_button = QtWidgets.QPushButton("-")
-        self.rmse_label = QtWidgets.QLabel("RMSE: N/A")
+    gray_left = cv2.cvtColor(left_frame, cv2.COLOR_BGR2GRAY)
+    gray_right = cv2.cvtColor(right_frame, cv2.COLOR_BGR2GRAY)
 
-        # Right side configuration panel
-        options_group = QtWidgets.QGroupBox("Options")
-        options_layout = QtWidgets.QVBoxLayout()
-        options_layout.addWidget(self.cam_checkbox)
-        options_layout.addWidget(self.holo_checkbox)
-        options_group.setLayout(options_layout)
+    retL3, cornersL3 = cv2.findChessboardCorners(gray_left, (3, 6), None)
+    retR3, cornersR3 = cv2.findChessboardCorners(gray_right, (3, 6), None)
+    retL4, cornersL4 = cv2.findChessboardCorners(gray_left, (3, 7), None)
+    retR4, cornersR4 = cv2.findChessboardCorners(gray_right, (3, 7), None)
+    
+    if not retR4 or not retL4 or not retR3 or not retL3:
+        return left_frame, right_frame, markersIn3D
+    
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+    cornersL3 = cv2.cornerSubPix(gray_left, cornersL3, (11, 11), (-1, -1), criteria)
+    cornersR3 = cv2.cornerSubPix(gray_right, cornersR3, (11, 11), (-1, -1), criteria)
+    cornersL4 = cv2.cornerSubPix(gray_left, cornersL4, (11, 11), (-1, -1), criteria)
+    cornersR4 = cv2.cornerSubPix(gray_right, cornersR4, (11, 11), (-1, -1), criteria)
 
-        # Transform configuration
-        transform_group = QtWidgets.QGroupBox("Transform")
-        transform_layout = QtWidgets.QVBoxLayout()
-        self.transform_checkbox = QtWidgets.QCheckBox("Show Transform Point")
-        self.transform_checkbox.setChecked(True)
-        fields_layout = QtWidgets.QHBoxLayout()
-        self.transform_x = QtWidgets.QLineEdit()
-        self.transform_x.setPlaceholderText("X")
-        self.transform_x.setMaximumWidth(50)
-        self.transform_y = QtWidgets.QLineEdit()
-        self.transform_y.setPlaceholderText("Y")
-        self.transform_y.setMaximumWidth(50)
-        self.transform_z = QtWidgets.QLineEdit()
-        self.transform_z.setPlaceholderText("Z")
-        self.transform_z.setMaximumWidth(50)
-        fields_layout.addWidget(self.transform_x)
-        fields_layout.addWidget(self.transform_y)
-        fields_layout.addWidget(self.transform_z)
-        self.transform_apply = QtWidgets.QPushButton("Apply")
-        transform_layout.addWidget(self.transform_checkbox)
+    marker_size = 10
 
-        self.matrix_buttons = []
-        self.matrix_group = QtWidgets.QButtonGroup()
-        for i in range(4):
-            btn = QtWidgets.QRadioButton(f"Matrix {i + 1}")
-            self.matrix_buttons.append(btn)
-            self.matrix_group.addButton(btn, i)
-            transform_layout.addWidget(btn)
-        self.matrix_buttons[0].setChecked(True)
+    # === Stereo rectify intrinsics (no rectification needed)
+    R1, R2, P1, P2, Q, _, _ = cv2.stereoRectify(K1, D1, K2, D2, image_size, R, T, flags=cv2.CALIB_ZERO_DISPARITY, alpha=0)
 
-        self.matrix_apply_button = QtWidgets.QPushButton("Transform")
-        transform_layout.addWidget(self.matrix_apply_button)
+    for _, (ptL, ptR) in enumerate(zip(cornersL3, cornersR3)):
+        all_markers_count += 1
+        if all_markers_count not in SELECTED_MARKERS:
+            continue
+        Selected_markers_count += 1
 
-        transform_layout.addLayout(fields_layout)
-        transform_layout.addWidget(self.transform_apply)
-        transform_group.setLayout(transform_layout)
+        markersIn3D[all_markers_count] = np.array(triangulate_3D(P1, P2, ptL.reshape(2, 1), ptR.reshape(2, 1)))
 
-        view_group = QtWidgets.QGroupBox("View")
-        view_layout = QtWidgets.QHBoxLayout()
-        view_layout.addWidget(self.reset_button)
-        view_layout.addWidget(self.zoom_in_button)
-        view_layout.addWidget(self.zoom_out_button)
-        view_group.setLayout(view_layout)
+        ptL = tuple(ptL.ravel().astype(int))
+        ptR = tuple(ptR.ravel().astype(int))
 
-        right_layout = QtWidgets.QVBoxLayout()
-        right_layout.addWidget(options_group)
-        right_layout.addWidget(transform_group)
-        right_layout.addWidget(view_group)
-        right_layout.addStretch()
-        right_layout.addWidget(self.rmse_label)
+        center = (int(ptL[0]), int(ptL[1]))
+        cv2.line(left_frame, (center[0] - marker_size, center[1]), (center[0] + marker_size, center[1]), (0, 255, 0), 2)
+        cv2.line(left_frame, (center[0], center[1] - marker_size), (center[0], center[1] + marker_size), (0, 255, 0), 2)
+        cv2.putText(left_frame, str(Selected_markers_count), (center[0] + 5, center[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
 
-        layout = QtWidgets.QHBoxLayout(self)
-        layout.addWidget(self.plotter.interactor, 1)
-        layout.addLayout(right_layout)
-
-        self.cam_checkbox.stateChanged.connect(self.update_scene)
-        self.holo_checkbox.stateChanged.connect(self.update_scene)
-        self.transform_checkbox.stateChanged.connect(self.update_scene)
-        self.reset_button.clicked.connect(self.reset_view)
-        self.zoom_in_button.clicked.connect(self.zoom_in)
-        self.zoom_out_button.clicked.connect(self.zoom_out)
-        self.transform_apply.clicked.connect(self.apply_transform)
-        self.matrix_apply_button.clicked.connect(self.apply_matrix_transform)
-
-        self.receiver = DataReceiver(parent=self)
-        self.receiver.updated_points.connect(self.set_all_pairs)
-        self.receiver.start()
-
-    def closeEvent(self, event):
-        self.receiver.stop()
-        self.receiver.wait()
-        super().closeEvent(event)
-
-    @QtCore.pyqtSlot(list, list)
-    def set_all_pairs(self, camera_points, holo_points):
-        self.camera_points = camera_points
-        self.holo_points = holo_points
-        self.update_rmse()
-        self.update_scene()
-
-    def update_rmse(self):
-        if not self.camera_points:
-            self.rmse_label.setText("RMSE: N/A")
-            return
-        cams = np.vstack(self.camera_points)
-        holos = np.vstack(self.holo_points)
-        diff = cams - holos
-        rmse = np.sqrt(np.mean(np.sum(diff * diff, axis=1)))
-        self.rmse_label.setText(f"RMSE: {rmse:.4f}")
-
-    def reset_view(self):
-        """Reset camera orientation with Z axis pointing up."""
-        self.plotter.view_isometric()
-        self.plotter.reset_camera()
-        self.plotter.render()
-
-    def zoom_in(self):
-        """Zoom the view in."""
-        self._zoom(1.2)
-
-    def zoom_out(self):
-        """Zoom the view out."""
-        self._zoom(0.8)
-
-    def handle_matrix_mode(self):
-        matrix_path = "Assets/Scripts/GUI/transform_data.txt"
-        try:
-            with open(matrix_path, "r") as f:
-                matrix_json =json.load(f)
-            required_keys = [
-                "similarity_transform", "affine_transform", 
-                "similarity_transform_ransac", "affine_transform_ransac"
-                ]
-            self.transform_matrices = []
-            for key in required_keys:
-                if key not in required_keys:
-                    raise ValueError(f"Missing required key: {key}")
-                matrix_data = matrix_json[key]
-                matrix = np.array(matrix_data).reshape(4, 4)
-                self.transform_matrices.append(matrix)
-
-            rmse_values = matrix_json.get("rmse", [0, 0, 0, 0])
-            row_dict = matrix_json.get("rows", {})
-            num_rows = len(row_dict.get("Camera", []))
-            point_rows = []
-            for i in range(num_rows):
-                row = [
-                    row_dict["Camera"][i],
-                    row_dict["Hololens"][i],
-                    row_dict["similarity_transformed_B"][i],
-                    row_dict["similarity_transform_errors"][i],
-                    row_dict["affine_transformed_B"][i],
-                    row_dict["affine_transform_errors"][i],
-                    row_dict["similarity_transformed_ransac_B"][i],
-                    row_dict["similarity_transform_ransac_errors"][i],
-                    row_dict["affine_transformed_ransac_B"][i],
-                    row_dict["affine_transform_ransac_errors"][i],
-                ]
-                point_rows.append(row)
-            
-            self.matrix_info_window = MatrixInfoWindow(self.transform_matrices, point_rows, rmse_values, self)
-            self.matrix_info_window.show()
-
-            print("[MainWindow] Transform matrices loaded successfully.")
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "Matrix Load Failed", str(e))
-            print(f"[MainWindow] Error loading matrices: {e}")
-
-    def apply_matrix_transform(self):
-        idx = self.matrix_group.checkedId()
-        if idx < 0 or idx >= len(self.transform_matrices):
-            print("[MainWindow] Invalid matrix index selected.")
-            return
-        
-        matrix = self.transform_matrices[idx]
-        transformed = []
-        for pt in self.camera_points:
-            pt_h = np.append(pt, 1.0)
-            new_pt = matrix @ pt_h
-            transformed.append(new_pt[:3])
-
-        self.transform_points = transformed
-        self.update_scene()
-
-    def apply_transform(self):
-        """Read transform point from fields and store it."""
-        try:
-            x = float(self.transform_x.text())
-            y = float(self.transform_y.text())
-            z = float(self.transform_z.text())
-        except ValueError:
-            return
-        self.transform_points.append(np.array([x, y, z]))
-        self.transform_points = self.transform_points[-12:]
-        self.update_scene()
-
-    def _zoom(self, factor: float):
-        camera = self.plotter.camera
-        if hasattr(camera, "Zoom"):
-            camera.Zoom(factor)
-        self.plotter.render()
-
-    def draw_dashed_line(self, p1, p2, segments=30):
-        points = np.linspace(p1, p2, segments * 2).reshape(-1, 2, 3)
-        for i, (start, end) in enumerate(points):
-            if i % 2 == 0:
-                self.plotter.add_lines(np.array([start, end]), color="gray", width=4)
-
-    def update_scene(self):
-        self.plotter.clear()
-        self.plotter.show_axes()
-        self.plotter.show_grid()
-
-        if self.camera_points:
-            self.plotter.add_points(
-                np.vstack(self.camera_points),
-                color="red",
-                point_size=14,
-                opacity=1.0 if self.cam_checkbox.isChecked() else 0.0,
-                render_points_as_spheres=True,
-            )
-
-        if self.holo_points:
-            self.plotter.add_points(
-                np.vstack(self.holo_points),
-                color="blue",
-                point_size=14,
-                opacity=1.0 if self.holo_checkbox.isChecked() else 0.0,
-                render_points_as_spheres=True,
-            )
-
-        if self.transform_points and self.transform_checkbox.isChecked():
-            self.plotter.add_points(
-                np.vstack(self.transform_points),
-                color="green",
-                point_size=14,
-                render_points_as_spheres=True,
-            )
-
-        if (
-            self.camera_points
-            and self.holo_points
-            and self.cam_checkbox.isChecked()
-            and self.holo_checkbox.isChecked()
-        ):
-            for cam, holo in zip(self.camera_points, self.holo_points):
-                self.draw_dashed_line(cam, holo)
-
-        self.plotter.render()
+        center = (int(ptR[0]), int(ptR[1]))
+        cv2.line(right_frame, (center[0] - marker_size, center[1]), (center[0] + marker_size, center[1]), (0, 255, 0), 2)
+        cv2.line(right_frame, (center[0], center[1] - marker_size), (center[0], center[1] + marker_size), (0, 255, 0), 2)
+        cv2.putText(right_frame, str(Selected_markers_count), (center[0] + 5, center[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
 
 
-if __name__ == "__main__":
-    app = QtWidgets.QApplication(sys.argv)
-    window = MainWindow()
-    window.resize(800, 600)
-    window.show()
-    sys.exit(app.exec_())
+    for _, (ptL, ptR) in enumerate(zip(cornersL4, cornersR4)):
+        all_markers_count += 1
+        if all_markers_count not in SELECTED_MARKERS:  
+            continue
+        Selected_markers_count += 1
+
+        markersIn3D[all_markers_count] = np.array(triangulate_3D(P1, P2, ptL.reshape(2, 1), ptR.reshape(2, 1)))
+
+        ptL = tuple(ptL.ravel().astype(int))
+        ptR = tuple(ptR.ravel().astype(int))
+
+        center = (int(ptL[0]), int(ptL[1]))
+        cv2.line(left_frame, (center[0] - marker_size, center[1]), (center[0] + marker_size, center[1]), (0, 255, 0), 2)
+        cv2.line(left_frame, (center[0], center[1] - marker_size), (center[0], center[1] + marker_size), (0, 255, 0), 2)
+        cv2.putText(left_frame, str(Selected_markers_count), (center[0] + 5, center[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+
+        center = (int(ptR[0]), int(ptR[1]))
+        cv2.line(right_frame, (center[0] - marker_size, center[1]), (center[0] + marker_size, center[1]), (0, 255, 0), 2)
+        cv2.line(right_frame, (center[0], center[1] - marker_size), (center[0], center[1] + marker_size), (0, 255, 0), 2)
+        cv2.putText(right_frame, str(Selected_markers_count), (center[0] + 5, center[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+
+    return left_frame, right_frame, markersIn3D
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    left_frame = frame[:, :800]
+    right_frame = frame[:, 800:]
+
+    left_frame, right_frame, markersIn3D = find_checkered_pattern(right_frame, left_frame)
+
+    send_frame_left(left_frame, count)
+    send_frame_right(right_frame, count)
+
+    count += 1
+    print(f"📤 Frames {count} Sent, length: {len(left_frame)} bytes")    
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+
+    if len(markersIn3D) > 0:
+        cleaned = {k: v.tolist() for k, v in markersIn3D.items()}
+        allPoints = json.dumps(cleaned)
+        output_socket.sendto(allPoints.encode('utf-8'), (OUTPUT_IP, OUTPUT_PORT))
+        print(f"{len(markersIn3D)} 3D Points Sent")
+
+
+    # === Show annotated views ===
+    combined = np.hstack((left_frame, right_frame))
+    cv2.imshow("Annotated Corners", combined)
+    cv2.waitKey(1)
+
+    # if len(markersIn3D) > 0:
+    #     # === Compute distance
+    #     index1, index2 = 10, 11
+    #     P3D_1 = markersIn3D.get(index1)
+    #     P3D_2 = markersIn3D.get(index2)
+    #     distance_mm = np.linalg.norm(P3D_1 - P3D_2)
+    #     os.system('cls' if os.name == 'nt' else 'clear')
+    #     print(f"Distance (mm): {distance_mm:.2f}")
+
+ 
