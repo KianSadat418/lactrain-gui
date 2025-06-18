@@ -15,14 +15,13 @@ from pyvistaqt import QtInteractor
 class DataReceiver(QtCore.QThread):
     """Thread that receives point pairs from a socket or generates synthetic data."""
 
-    new_pair = QtCore.pyqtSignal(object, object)
+    updated_points = QtCore.pyqtSignal(list, list)
 
     def __init__(self, host: str = "0.0.0.0", port: int = 9991, parent=None):
         super().__init__(parent)
         self.host = host
         self.port = port
         self._running = True
-        self.test_mode = False
 
     def stop(self):
         self._running = False
@@ -33,13 +32,7 @@ class DataReceiver(QtCore.QThread):
             server_socket.bind((self.host, self.port))
         except Exception as e:
             print(f"[Receiver] Failed to start server: {e}")
-            self.test_mode = True
 
-        if self.test_mode:
-            self._run_test_mode()
-            return
-
-        added_idx = []
         while self._running:
             try:
                 data, addr = server_socket.recvfrom(650000)
@@ -47,26 +40,19 @@ class DataReceiver(QtCore.QThread):
                     continue
                 line = data.decode('utf-8')
                 data = json.loads(line)
+                camera_points = []
+                holo_points = []
                 for key, value in data.items():
-                    if key not in added_idx:
-                        added_idx.append(key)
-                        cam = np.array(value[0])
-                        holo = np.array(value[1])
-                        print(f"[Receiver] Received pair {key}: Cam {cam}, Holo {holo}")
-                        self.new_pair.emit(cam, holo)
+                    cam = np.array(value[0])
+                    holo = np.array(value[1])
+                    camera_points.append(cam)
+                    holo_points.append(holo)
+                self.updated_points.emit(camera_points, holo_points)
             except json.JSONDecodeError:
                 continue
             except Exception as e:
                 print(f"[Receiver] Error receiving data: {e}")
                 break
-
-    def _run_test_mode(self):
-        rng = np.random.default_rng()
-        while self._running:
-            cam = rng.random(3)
-            holo = cam + rng.normal(scale=0.1, size=3)
-            self.new_pair.emit(cam, holo)
-            time.sleep(random.uniform(0.5, 1.0))
 
 
 class MainWindow(QtWidgets.QWidget):
@@ -152,7 +138,7 @@ class MainWindow(QtWidgets.QWidget):
         self.transform_apply.clicked.connect(self.apply_transform)
 
         self.receiver = DataReceiver()
-        self.receiver.new_pair.connect(self.add_pair)
+        self.receiver.updated_points.connect(self.set_all_pairs)
         self.receiver.start()
 
     def closeEvent(self, event):
@@ -160,13 +146,10 @@ class MainWindow(QtWidgets.QWidget):
         self.receiver.wait()
         super().closeEvent(event)
 
-    @QtCore.pyqtSlot(object, object)
-    def add_pair(self, cam, holo):
-        self.camera_points.append(cam)
-        self.holo_points.append(holo)
-        # Keep only the last 12 pairs
-        self.camera_points = self.camera_points[-12:]
-        self.holo_points = self.holo_points[-12:]
+    @QtCore.pyqtSlot(list, list)
+    def set_all_pairs(self, camera_points, holo_points):
+        self.camera_points = camera_points
+        self.holo_points = holo_points
         self.update_rmse()
         self.update_scene()
 
@@ -223,19 +206,21 @@ class MainWindow(QtWidgets.QWidget):
         self.plotter.show_axes()
         self.plotter.show_grid()
 
-        if self.camera_points and self.cam_checkbox.isChecked():
+        if self.camera_points:
             self.plotter.add_points(
                 np.vstack(self.camera_points),
                 color="red",
                 point_size=14,
+                opacity=1.0 if self.cam_checkbox.isChecked() else 0.0,
                 render_points_as_spheres=True,
             )
 
-        if self.holo_points and self.holo_checkbox.isChecked():
+        if self.holo_points:
             self.plotter.add_points(
                 np.vstack(self.holo_points),
                 color="blue",
                 point_size=14,
+                opacity=1.0 if self.holo_checkbox.isChecked() else 0.0,
                 render_points_as_spheres=True,
             )
 
