@@ -1,14 +1,11 @@
 import sys
 import socket
 import json
-import random
-import time
 from typing import List
 
 import numpy as np
 import PyQt5.QtCore as QtCore
 import PyQt5.QtWidgets as QtWidgets
-import pyvista as pv
 from pyvistaqt import QtInteractor
 
 
@@ -56,6 +53,45 @@ class DataReceiver(QtCore.QThread):
             except Exception as e:
                 print(f"[Receiver] Error receiving data: {e}")
                 break
+
+
+class MatrixInfoWindow(QtWidgets.QWidget):
+    def __init__(self, matrix_data, point_rows, rmse_values, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Transformation Matrix Info")
+        self.setMinimumWidth(1000)
+        layout = QtWidgets.QVBoxLayout()
+
+        # Table setup
+        table = QtWidgets.QTableWidget()
+        table.setColumnCount(10)
+        table.setHorizontalHeaderLabels([
+            "Camera", "HoloLens",
+            "Sim Xform", "Sim Error",
+            "Affine Xform", "Affine Error",
+            "Sim RANSAC", "Sim RANSAC Error",
+            "Affine RANSAC", "Affine RANSAC Error"
+        ])
+        table.setRowCount(len(point_rows))
+        for i, row in enumerate(point_rows):
+            for j, val in enumerate(row):
+                table.setItem(i, j, QtWidgets.QTableWidgetItem(str(val)))
+        layout.addWidget(table)
+
+        # Matrices and RMSE
+        matrix_layout = QtWidgets.QFormLayout()
+        for name, mat, rmse in zip(
+            ["Similarity", "Affine", "Similarity RANSAC", "Affine RANSAC"],
+            matrix_data,
+            rmse_values
+        ):
+            mat_str = "\n".join("  ".join(f"{v:.4f}" for v in row) for row in mat)
+            matrix_label = QtWidgets.QLabel(f"<pre>{mat_str}</pre>")
+            matrix_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            matrix_layout.addRow(f"{name} Matrix (RMSE: {rmse:.4f})", matrix_label)
+
+        layout.addLayout(matrix_layout)
+        self.setLayout(layout)
 
 
 class MainWindow(QtWidgets.QWidget):
@@ -200,7 +236,10 @@ class MainWindow(QtWidgets.QWidget):
         try:
             with open(matrix_path, "r") as f:
                 matrix_json =json.load(f)
-            required_keys = ["similarity_transform", "affine_transform", "similarity_transform_ransac", "affine_transform_ransac"]
+            required_keys = [
+                "similarity_transform", "affine_transform", 
+                "similarity_transform_ransac", "affine_transform_ransac"
+                ]
             self.transform_matrices = []
             for key in required_keys:
                 if key not in required_keys:
@@ -208,6 +247,15 @@ class MainWindow(QtWidgets.QWidget):
                 matrix_data = matrix_json[key]
                 matrix = np.array(matrix_data).reshape(4, 4)
                 self.transform_matrices.append(matrix)
+
+            point_rows = matrix_json.get("rows", [])
+            rmse_values = matrix_json.get("rmse", [0, 0, 0, 0])
+            if not point_rows:
+                raise ValueError("No point rows found in matrix data.")
+            
+            self.matrix_info_window = MatrixInfoWindow(self.transform_matrices, point_rows, rmse_values, self)
+            self.matrix_info_window.show()
+
             print("[MainWindow] Transform matrices loaded successfully.")
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Matrix Load Failed", str(e))
@@ -225,8 +273,8 @@ class MainWindow(QtWidgets.QWidget):
             pt_h = np.append(pt, 1.0)
             new_pt = matrix @ pt_h
             transformed.append(new_pt[:3])
-        self.transform_points.extend(transformed)
-        self.transform_points = self.transform_points[-12:]
+
+        self.transform_points = transformed
         self.update_scene()
 
     def apply_transform(self):
@@ -247,7 +295,7 @@ class MainWindow(QtWidgets.QWidget):
             camera.Zoom(factor)
         self.plotter.render()
 
-    def draw_dashed_line(self, p1, p2, segments=12):
+    def draw_dashed_line(self, p1, p2, segments=30):
         points = np.linspace(p1, p2, segments * 2).reshape(-1, 2, 3)
         for i, (start, end) in enumerate(points):
             if i % 2 == 0:
@@ -280,7 +328,7 @@ class MainWindow(QtWidgets.QWidget):
             self.plotter.add_points(
                 np.vstack(self.transform_points),
                 color="green",
-                point_size=18,
+                point_size=14,
                 render_points_as_spheres=True,
             )
 
