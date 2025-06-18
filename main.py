@@ -39,11 +39,8 @@ class DataReceiver(QtCore.QThread):
                 if not data:
                     continue
                 line = data.decode('utf-8').strip()
-
                 if line.startswith("M"):
-                    payload = line[1:]
-                    data = json.loads(payload)
-                    self.parent().handle_matrix_mode(data)
+                    self.parent().handle_matrix_mode()
                 else:
                     data = json.loads(line)
                     camera_points = []
@@ -198,8 +195,8 @@ class MainWindow(QtWidgets.QWidget):
         """Zoom the view out."""
         self._zoom(0.8)
 
-    def handle_matrix_mode(self, data):
-        matrix_path = "transform_data.txt"
+    def handle_matrix_mode(self):
+        matrix_path = "Assets/Scripts/GUI/transform_data.txt"
         try:
             with open(matrix_path, "r") as f:
                 matrix_json =json.load(f)
@@ -209,8 +206,6 @@ class MainWindow(QtWidgets.QWidget):
                 if key not in required_keys:
                     raise ValueError(f"Missing required key: {key}")
                 matrix_data = matrix_json[key]
-                if len(matrix_data) != 16:
-                    raise ValueError(f"{key} must have 16 elements.")
                 matrix = np.array(matrix_data).reshape(4, 4)
                 self.transform_matrices.append(matrix)
             print("[MainWindow] Transform matrices loaded successfully.")
@@ -223,6 +218,7 @@ class MainWindow(QtWidgets.QWidget):
         if idx < 0 or idx >= len(self.transform_matrices):
             print("[MainWindow] Invalid matrix index selected.")
             return
+        
         matrix = self.transform_matrices[idx]
         transformed = []
         for pt in self.camera_points:
