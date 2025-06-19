@@ -41,15 +41,12 @@ class DataReceiver(QtCore.QThread):
                     )
                 elif line.startswith("V"):
                     try:
-                        v_data = json.loads(line[1:])
-                        QtCore.QMetaObject.invokeMethod(
-                            self.parent(),
-                            "receive_virtual_transform",
-                            QtCore.Qt.QueuedConnection,
-                            QtCore.Q_ARG(dict, v_data),
-                        )
+                        data = json.loads(line[1:])
+                        x, y, z = float(data["x"]), float(data["y"]), float(data["z"])
+                        self.parent().peg_validation_point = np.array([x, y, z])
+                        self.parent().update_scene()
                     except Exception as e:
-                        print(f"[Receiver] Error parsing virtual transform data: {e}")
+                        print(f"[Receiver] Error parsing or handling V message: {e}")
                 elif line.startswith("G"):
                     try:
                         gaze_data = json.loads(line[1:])
@@ -177,7 +174,7 @@ class MainWindow(QtWidgets.QWidget):
         self.camera_points: List[np.ndarray] = []
         self.holo_points: List[np.ndarray] = []
         self.transform_points: List[np.ndarray] = []
-        self.virtual_transform_point = None
+        self.peg_validation_point = None
         self.transform_matrices = []
 
         # UI setup
@@ -446,9 +443,9 @@ class MainWindow(QtWidgets.QWidget):
                 render_points_as_spheres=True,
             )
 
-        if self.virtual_transform_point is not None and self.transform_checkbox.isChecked():
+        if self.peg_validation_point is not None and self.transform_checkbox.isChecked():
             self.plotter.add_points(
-                self.virtual_transform_point.reshape(1, 3),
+                np.array([self.peg_validation_point]),
                 color="purple",
                 point_size=14,
                 render_points_as_spheres=True,
