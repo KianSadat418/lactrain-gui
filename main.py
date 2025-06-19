@@ -176,6 +176,7 @@ class MainWindow(QtWidgets.QWidget):
         self.holo_points: List[np.ndarray] = []
         self.transform_points: List[np.ndarray] = []
         self.peg_validation_point = None
+        self.peg_validation_actor = None
         self.transform_matrices = []
 
         # UI setup
@@ -289,7 +290,18 @@ class MainWindow(QtWidgets.QWidget):
     @QtCore.pyqtSlot(np.ndarray)
     def set_peg_validation_point(self, point):
         self.peg_validation_point = point
-        self.update_scene()
+
+        if self.peg_validation_actor:
+            self.plotter.remove_actor(self.peg_validation_actor)
+
+        if self.transform_checkbox.isChecked():
+            self.peg_validation_actor = self.plotter.add_points(
+                np.array([point]),
+                color="purple",
+                point_size=14,
+                render_points_as_spheres=True
+            )
+        self.plotter.render()
 
     @QtCore.pyqtSlot(dict)
     def receive_gaze_data(self, gaze_data: dict):
@@ -437,14 +449,6 @@ class MainWindow(QtWidgets.QWidget):
             self.plotter.add_points(
                 np.vstack(self.transform_points),
                 color="green",
-                point_size=14,
-                render_points_as_spheres=True,
-            )
-
-        if self.peg_validation_point is not None and self.transform_checkbox.isChecked():
-            self.plotter.add_points(
-                np.array([self.peg_validation_point]),
-                color="purple",
                 point_size=14,
                 render_points_as_spheres=True,
             )
