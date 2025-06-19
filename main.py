@@ -12,6 +12,7 @@ from pyvistaqt import QtInteractor
 
 class DataReceiver(QtCore.QThread):
     updated_points = QtCore.pyqtSignal(list, list)
+    peg_point_received = QtCore.pyqtSignal(np.ndarray)
 
     def __init__(self, host: str = "0.0.0.0", port: int = 9991, parent=None):
         super().__init__(parent)
@@ -43,8 +44,8 @@ class DataReceiver(QtCore.QThread):
                     try:
                         data = json.loads(line[1:])
                         x, y, z = float(data["x"]), float(data["y"]), float(data["z"])
-                        self.parent().peg_validation_point = np.array([x, y, z])
-                        self.parent().update_scene()
+                        point = np.array([x, y, z])
+                        self.peg_point_received.emit(point)
                     except Exception as e:
                         print(f"[Receiver] Error parsing or handling V message: {e}")
                 elif line.startswith("G"):
@@ -270,6 +271,7 @@ class MainWindow(QtWidgets.QWidget):
 
         self.receiver = DataReceiver(parent=self)
         self.receiver.updated_points.connect(self.set_all_pairs)
+        self.receiver.peg_point_received.connect(self.set_peg_validation_point)
         self.receiver.start()
 
     def closeEvent(self, event):
@@ -284,19 +286,15 @@ class MainWindow(QtWidgets.QWidget):
         self.update_rmse()
         self.update_scene()
 
+    @QtCore.pyqtSlot(np.ndarray)
+    def set_peg_validation_point(self, point):
+        self.peg_validation_point = point
+        self.update_scene()
+
     @QtCore.pyqtSlot(dict)
     def receive_gaze_data(self, gaze_data: dict):
         if hasattr(self, "gaze_window") and self.gaze_window:
             self.gaze_window.update_gaze_visual(gaze_data)
-
-    def receive_virtual_transform(self, data: dict):
-        try:
-            self.virtual_transform_point = np.array([
-                float(data["x"]), float(data["y"]), float(data["z"])
-            ])
-            self.update_scene()
-        except Exception as e:
-            print(f"[MainWindow] Error handling virtual transform data: {e}")
 
     def update_rmse(self):
         if not self.camera_points:
