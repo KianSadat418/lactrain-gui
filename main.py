@@ -124,6 +124,10 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         self.setMinimumSize(600, 400)
         self.plotter = QtInteractor(self)
 
+        self.last_gaze_line = None
+        self.gaze_history = []
+        self.max_history = 50
+
         layout = QtWidgets.QVBoxLayout()
         label = QtWidgets.QLabel("Gaze Tracking Interface")
 
@@ -142,20 +146,72 @@ class GazeTrackingWindow(QtWidgets.QWidget):
             self.plotter.show_axes()
             self.plotter.show_grid()
 
-            gaze_line = np.array(gaze_data["gaze_line"])
+            gaze_line = np.array(gaze_data["gaze_line"])  # shape (2, 3)
+            A, B = gaze_line[0], gaze_line[1]
+            direction = B - A
+            norm_direction = direction / np.linalg.norm(direction)
+
+            if self.last_gaze_line is not None:
+                steps = 10
+                for alpha in np.linspace(0, 1, steps):
+                    interpolated = (1 - alpha) * self.last_gaze_line + alpha * gaze_line
+                    self.plotter.clear()
+                    self.plotter.show_axes()
+                    self.plotter.show_grid()
+                    self.plotter.add_lines(interpolated, color="green", width=3)
+                    self.plotter.render()
+                    QtWidgets.QApplication.processEvents()
+
             self.plotter.add_lines(gaze_line, color="green", width=3)
+            self.last_gaze_line = gaze_line
 
-
-            roi_center = np.array(gaze_data["roi"][0])
+            disc_center = A + 0.5 * direction
             roi_radius = float(gaze_data["roi"][1])
-            roi_disc = pv.Disc(center=roi_center, inner=0, outer=roi_radius, normal=(0, 0, 1), r_res=1, c_res=100)
-            self.plotter.add_mesh(roi_disc, color="yellow", opacity=0.5, show_edges=True)
+            disc = pv.Disc(center=disc_center, inner=0, outer=roi_radius, normal=norm_direction, r_res=1, c_res=100)
+            self.plotter.add_mesh(disc, color="yellow", opacity=0.5)
+
+            cone_length = float(np.linalg.norm(disc_center - A))
+            cone = pv.Cone(center=A, direction=norm_direction, height=cone_length, radius=roi_radius)
+            self.plotter.add_mesh(cone, color="orange", opacity=0.3)
 
             pegs = np.array(gaze_data["pegs"])
-            self.plotter.add_points(pegs, color="blue", point_size=12, render_points_as_spheres=True)
+            closest_peg = None
+            closest_point = None
+            min_dist = float("inf")
 
-            if gaze_data.get("intercept", False):
-                self.plotter.add_text("ROI INTERCEPT", position="upper_left", font_size=14, color="red")
+            def point_line_distance(p, a, b):
+                ap = p - a
+                ab = b - a
+                t = max(0, min(1, np.dot(ap, ab) / np.dot(ab, ab)))
+                closest = a + t * ab
+                return np.linalg.norm(p - closest), closest
+
+            for peg in pegs:
+                dist, proj = point_line_distance(peg, A, B)
+                if dist < min_dist:
+                    min_dist = dist
+                    closest_point = proj
+                    closest_peg = peg
+
+            for peg in pegs:
+                is_closest = closest_peg is not None and np.allclose(peg, closest_peg)
+                color = "red" if is_closest else "blue"
+                self.plotter.add_points(np.array([peg]), color=color, point_size=12, render_points_as_spheres=True)
+
+            if closest_point is not None and closest_peg is not None:
+                segments = 20
+                dashed_points = np.linspace(closest_point, closest_peg, segments * 2).reshape(-1, 2, 3)
+                for i, (start, end) in enumerate(dashed_points):
+                    if i % 2 == 0:
+                        self.plotter.add_lines(np.array([start, end]), color="red", width=2)
+
+            self.gaze_history.append(disc_center)
+            if len(self.gaze_history) > self.max_history:
+                self.gaze_history.pop(0)
+
+            if len(self.gaze_history) > 1:
+                trail = np.array(self.gaze_history)
+                self.plotter.add_lines(trail, color="purple", width=1)
 
             self.plotter.render()
         except Exception as e:
