@@ -175,7 +175,8 @@ class MainWindow(QtWidgets.QWidget):
         self.camera_points: List[np.ndarray] = []
         self.holo_points: List[np.ndarray] = []
         self.matrix_transform_points: List[np.ndarray] = []
-        self.manual_transform_points: List[np.ndarray] = []
+        self.manual_points: List[np.ndarray] = []
+        self.manual_transformed_points: List[np.ndarray] = []
         self.peg_validation_point = None
         self.peg_validation_actor = None
         self.transform_matrices = []
@@ -306,6 +307,21 @@ class MainWindow(QtWidgets.QWidget):
                 point_size=14,
                 render_points_as_spheres=True
             )
+
+            idx = self.matrix_group.checkedId()
+            if 0 <= idx < len(self.transform_matrices):
+                matrix = self.transform_matrices[idx]
+                pt_h = np.append(point, 1.0)
+                transformed = matrix @ pt_h
+                transformed_point = transformed[:3]
+
+                self.plotter.add_points(
+                    np.array([transformed_point]),
+                    color="#300053",
+                    point_size=14,
+                    render_points_as_spheres=True
+                )
+
         self.plotter.render()
 
     @QtCore.pyqtSlot(dict)
@@ -406,13 +422,25 @@ class MainWindow(QtWidgets.QWidget):
             z = float(self.transform_z.text())
         except ValueError:
             return
-        self.manual_transform_points.append(np.array([x, y, z]))
-        self.manual_transform_points = self.manual_transform_points[-12:]
+        
+        
+        manual_point = np.array([x, y, z])
+        self.manual_points.append(manual_point)
+
+        idx = self.matrix_group.checkedId()
+        if idx <= 0 < len(self.transform_matrices):
+            matrix = self.transform_matrices[idx]
+            pt_h = np.append(manual_point, 1.0)
+            transformed = matrix @ pt_h
+            transformed_point = transformed[:3]
+            self.manual_transformed_points.append(transformed_point)
+
         self.update_scene()
 
     def clear_transform_points(self):
         self.matrix_transform_points.clear()
-        self.manual_transform_points.clear()
+        self.manual_points.clear()
+        self.manual_transformed_points.clear()
         self.update_scene()
 
     def _zoom(self, factor: float):
@@ -459,14 +487,21 @@ class MainWindow(QtWidgets.QWidget):
             if self.matrix_transform_points:
                 self.plotter.add_points(
                     np.vstack(self.matrix_transform_points),
-                    color="green",
+                    color="green",  # transformed camera points
                     point_size=14,
                     render_points_as_spheres=True,
                 )
             if self.manual_transform_points:
                 self.plotter.add_points(
                     np.vstack(self.manual_transform_points),
-                    color="yellow",
+                    color="yellow",  # manual point
+                    point_size=14,
+                    render_points_as_spheres=True,
+                )
+            if self.manual_transformed_points:
+                self.plotter.add_points(
+                    np.vstack(self.manual_transformed_points),
+                    color="#5F5F00",  # dark yellow for manual transform
                     point_size=14,
                     render_points_as_spheres=True,
                 )
