@@ -9,6 +9,12 @@ import PyQt5.QtWidgets as QtWidgets
 import pyvista as pv
 from pyvistaqt import QtInteractor
 
+MATRIX_BUTTON_LABELS = [
+            "Similarity Xform",
+            "Affine Xform",
+            "Similarity Xform RANSAC",
+            "Affine Xform RANSAC"
+        ]
 
 class DataReceiver(QtCore.QThread):
     updated_points = QtCore.pyqtSignal(list, list)
@@ -160,7 +166,7 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         self.matrix_buttons = []
 
         for i in range(4):
-            btn = QtWidgets.QRadioButton(f"Matrix {i + 1}")
+            btn = QtWidgets.QRadioButton(f"{MATRIX_BUTTON_LABELS[i]}")
             self.matrix_group.addButton(btn, i)
             self.matrix_buttons.append(btn)
             transform_layout.addWidget(btn)
@@ -191,7 +197,7 @@ class GazeTrackingWindow(QtWidgets.QWidget):
             self.plotter.show_grid()
 
             self.current_gaze_data = gaze_data
-            gaze_line = np.array(gaze_data["gaze_line"])  # shape (2, 3)
+            gaze_line = np.array(gaze_data["gaze_line"])
             A, B = gaze_line[0], gaze_line[1]
             direction = B - A
             norm_direction = direction / np.linalg.norm(direction)
@@ -361,11 +367,10 @@ class MainWindow(QtWidgets.QWidget):
         self.clear_transform_button = QtWidgets.QPushButton("Clear Transform Points")
         transform_layout.addWidget(self.clear_transform_button)
 
-
         self.matrix_buttons = []
         self.matrix_group = QtWidgets.QButtonGroup()
         for i in range(4):
-            btn = QtWidgets.QRadioButton(f"Matrix {i + 1}")
+            btn = QtWidgets.QRadioButton(f"{MATRIX_BUTTON_LABELS[i]}")
             self.matrix_buttons.append(btn)
             self.matrix_group.addButton(btn, i)
             transform_layout.addWidget(btn)
