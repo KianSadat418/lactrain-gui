@@ -52,7 +52,7 @@ class DataReceiver(QtCore.QThread):
                     try:
                         gaze_data = json.loads(line[1:])
                         QtCore.QMetaObject.invokeMethod(
-                            self.parent(), "recieve_gaze_data", QtCore.Qt.QueuedConnection,
+                            self.parent(), "receive_gaze_data", QtCore.Qt.QueuedConnection,
                             QtCore.Q_ARG(dict, gaze_data)
                         )
                     except Exception as e:
@@ -118,24 +118,68 @@ class MatrixInfoWindow(QtWidgets.QWidget):
 
 
 class GazeTrackingWindow(QtWidgets.QWidget):
-    def __init__(self, parent=None):
+    def __init__(self, transform_matrices=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Gaze Tracking")
         self.setMinimumSize(600, 400)
         self.plotter = QtInteractor(self)
 
         self.last_gaze_line = None
+        self.gaze_line_actor = None
+        self.current_gaze_data = None
         self.gaze_history = []
         self.max_history = 50
+        self.selected_matrix_index = 0
+        self.transform_matrices = transform_matrices or []
 
-        layout = QtWidgets.QVBoxLayout()
-        label = QtWidgets.QLabel("Gaze Tracking Interface")
+        viewer_layout = QtWidgets.QVBoxLayout()
+        viewer_layout.addWidget(self.plotter.interactor)
 
-        label.setAlignment(QtCore.Qt.AlignCenter)
-        layout.addWidget(self.plotter.interactor)
-        layout.addWidget(label)
+        view_group = QtWidgets.QGroupBox("View")
+        view_layout = QtWidgets.QVBoxLayout()
 
-        self.setLayout(layout)
+        self.reset_button = QtWidgets.QPushButton("Reset View")
+        self.zoom_in_button = QtWidgets.QPushButton("+")
+        self.zoom_out_button = QtWidgets.QPushButton("-")
+
+        self.reset_button.clicked.connect(self.reset_view)
+        self.zoom_in_button.clicked.connect(self.zoom_in)
+        self.zoom_out_button.clicked.connect(self.zoom_out)
+
+        view_layout.addWidget(self.reset_button)
+        view_layout.addWidget(self.zoom_in_button)
+        view_layout.addWidget(self.zoom_out_button)
+        view_layout.addStretch()
+
+        view_group.setLayout(view_layout)
+
+        transform_group = QtWidgets.QGroupBox("Transform")
+        transform_layout = QtWidgets.QVBoxLayout()
+
+        self.matrix_group = QtWidgets.QButtonGroup()
+        self.matrix_buttons = []
+
+        for i in range(4):
+            btn = QtWidgets.QRadioButton(f"Matrix {i + 1}")
+            self.matrix_group.addButton(btn, i)
+            self.matrix_buttons.append(btn)
+            transform_layout.addWidget(btn)
+
+        self.matrix_buttons[0].setChecked(True)
+        transform_group.setLayout(transform_layout)
+
+        self.matrix_group.buttonClicked.connect(self.refresh_transform_and_redraw)
+
+        right_panel = QtWidgets.QVBoxLayout()
+        right_panel.addWidget(transform_group)
+        right_panel.addWidget(view_group)
+        right_panel.addStretch()
+
+        main_layout = QtWidgets.QHBoxLayout()
+        main_layout.addLayout(viewer_layout, stretch=4)
+        main_layout.addLayout(right_panel, stretch=1)
+
+        self.setLayout(main_layout)
 
         self.plotter.show_axes()
         self.plotter.show_grid()
@@ -146,23 +190,25 @@ class GazeTrackingWindow(QtWidgets.QWidget):
             self.plotter.show_axes()
             self.plotter.show_grid()
 
+            self.current_gaze_data = gaze_data
             gaze_line = np.array(gaze_data["gaze_line"])  # shape (2, 3)
             A, B = gaze_line[0], gaze_line[1]
             direction = B - A
             norm_direction = direction / np.linalg.norm(direction)
 
+            steps = 10
             if self.last_gaze_line is not None:
-                steps = 10
                 for alpha in np.linspace(0, 1, steps):
                     interpolated = (1 - alpha) * self.last_gaze_line + alpha * gaze_line
-                    self.plotter.clear()
-                    self.plotter.show_axes()
-                    self.plotter.show_grid()
-                    self.plotter.add_lines(interpolated, color="green", width=3)
+                    if self.gaze_line_actor is None:
+                        self.gaze_line_actor = self.plotter.add_lines(interpolated, color="green", width=3)
+                    else:
+                        self.gaze_line_actor.GetMapper().GetInput().GetPoints().SetData(pv.vtk_points(interpolated))
                     self.plotter.render()
                     QtWidgets.QApplication.processEvents()
+            else:
+                self.gaze_line_actor = self.plotter.add_lines(gaze_line, color="green", width=3)
 
-            self.plotter.add_lines(gaze_line, color="green", width=3)
             self.last_gaze_line = gaze_line
 
             disc_center = A + 0.5 * direction
@@ -174,7 +220,19 @@ class GazeTrackingWindow(QtWidgets.QWidget):
             cone = pv.Cone(center=A, direction=norm_direction, height=cone_length, radius=roi_radius)
             self.plotter.add_mesh(cone, color="orange", opacity=0.3)
 
-            pegs = np.array(gaze_data["pegs"])
+            original_pegs = np.array(gaze_data["pegs"])
+            idx = self.matrix_group.checkedId()
+            if 0 <= idx < len(self.transform_matrices):
+                matrix = self.transform_matrices[idx]
+                transformed_pegs = []
+                for pt in original_pegs:
+                    pt_h = np.append(pt, 1.0)
+                    transformed = matrix @ pt_h
+                    transformed_pegs.append(transformed[:3])
+                pegs = np.array(transformed_pegs)
+            else:
+                pegs = original_pegs
+
             closest_peg = None
             closest_point = None
             min_dist = float("inf")
@@ -216,6 +274,27 @@ class GazeTrackingWindow(QtWidgets.QWidget):
             self.plotter.render()
         except Exception as e:
             print(f"[GazeTrackingWindow] Failed to update visual: {e}")
+
+    def reset_view(self):
+        self.plotter.view_isometric()
+        self.plotter.reset_camera()
+        self.plotter.render()
+
+    def zoom_in(self):
+        self._zoom(1.2)
+
+    def zoom_out(self):
+        self._zoom(0.8)
+
+    def _zoom(self, factor: float):
+        camera = self.plotter.camera
+        if hasattr(camera, "Zoom"):
+            camera.Zoom(factor)
+        self.plotter.render()
+
+    def refresh_transform_and_redraw(self):
+        if self.current_gaze_data:
+            self.update_gaze_visual(self.current_gaze_data)
 
 
 class MainWindow(QtWidgets.QWidget):
@@ -484,7 +563,7 @@ class MainWindow(QtWidgets.QWidget):
         self.manual_points.append(manual_point)
 
         idx = self.matrix_group.checkedId()
-        if idx <= 0 < len(self.transform_matrices):
+        if 0 <= idx < len(self.transform_matrices):
             matrix = self.transform_matrices[idx]
             pt_h = np.append(manual_point, 1.0)
             transformed = matrix @ pt_h
@@ -507,7 +586,7 @@ class MainWindow(QtWidgets.QWidget):
 
     def open_gaze_tracking(self):
         print("[MainWindow] Launching gaze tracking window...")
-        self.gaze_window = GazeTrackingWindow()
+        self.gaze_window = GazeTrackingWindow(transform_matrices=self.transform_matrices)
         self.gaze_window.show()
 
     def draw_dashed_line(self, p1, p2, segments=30):
@@ -547,9 +626,9 @@ class MainWindow(QtWidgets.QWidget):
                     point_size=14,
                     render_points_as_spheres=True,
                 )
-            if self.manual_transform_points:
+            if self.manual_points:
                 self.plotter.add_points(
-                    np.vstack(self.manual_transform_points),
+                    np.vstack(self.manual_points),
                     color="yellow",  # manual point
                     point_size=14,
                     render_points_as_spheres=True,
