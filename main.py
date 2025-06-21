@@ -213,7 +213,9 @@ class GazeTrackingWindow(QtWidgets.QWidget):
                         self.gaze_line_actor = self.plotter.add_lines(interpolated, color="green", width=3)
                     else:
                         try:
-                            self.gaze_line_actor.GetMapper().GetInput().GetPoints().SetData(pv.vtk_points(interpolated))
+                            if self.gaze_line_actor is not None:
+                                self.plotter.remove_actor(self.gaze_line_actor)
+                            self.gaze_line_actor = self.plotter.add_lines(interpolated, color="green", width=3)
                         except Exception as e:
                             print(f"[GazeLine] Failed to update actor: {e}")
                     self.plotter.render()
