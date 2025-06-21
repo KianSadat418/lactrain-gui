@@ -132,7 +132,7 @@ class GazeTrackingWindow(QtWidgets.QWidget):
 
         self.latest_gaze_line = None
         self.line_mesh = pv.PolyData()
-        self.line_actor = self.plotter.add_mesh(self.line_mesh, color="green", line_width=3)
+        self.line_actor = self.plotter.add_mesh(self.line_mesh, color="green", line_width=3, render=False)
         self.gaze_line_actor = None
 
         self.timer = QtCore.QTimer()
