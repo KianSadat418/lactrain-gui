@@ -130,8 +130,14 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         self.setMinimumSize(600, 400)
         self.plotter = QtInteractor(self)
 
-        self.last_gaze_line = None
+        self.latest_gaze_line = None
+        self.line_mesh = pv.PolyData()
+        self.line_actor = self.plotter.add_mesh(self.line_mesh, color="green", line_width=3)
         self.gaze_line_actor = None
+
+        self.timer = QtCore.QTimer()
+        self.timer.timeout.connect(self._update_gaze_line_actor)
+
         self.current_gaze_data = None
         self.gaze_history = []
         self.max_history = 50
@@ -191,102 +197,104 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         self.plotter.show_grid()
 
     def update_gaze_visual(self, gaze_data: dict):
-        try:
-            self.plotter.clear()
-            self.plotter.show_axes()
-            self.plotter.show_grid()
+        self.current_gaze_data = gaze_data
 
-            self.current_gaze_data = gaze_data
-            gaze_line = np.array(gaze_data["gaze_line"])
-            A, B = gaze_line[0], gaze_line[1]
-            direction = B - A
-            norm_direction = direction / np.linalg.norm(direction)
+        # Update the cached gaze line for animation
+        if "gaze_line" in gaze_data:
+            line = np.array(gaze_data["gaze_line"])
+            if line.shape == (2, 3):
+                self.latest_gaze_line = line
 
-            steps = 10
-            if self.last_gaze_line is not None:
-                for alpha in np.linspace(0, 1, steps):
-                    interpolated = (1 - alpha) * self.last_gaze_line + alpha * gaze_line
-                    if interpolated.shape != (2, 3):
-                        print(f"[GazeLine] Invalid interpolated shape: {interpolated.shape}")
-                        continue
-                    if self.gaze_line_actor is None:
-                        self.gaze_line_actor = self.plotter.add_lines(interpolated, color="green", width=3)
-                    else:
-                        try:
-                            if self.gaze_line_actor is not None:
-                                self.plotter.remove_actor(self.gaze_line_actor)
-                            self.gaze_line_actor = self.plotter.add_lines(interpolated, color="green", width=3)
-                        except Exception as e:
-                            print(f"[GazeLine] Failed to update actor: {e}")
-                    self.plotter.render()
-                    QtWidgets.QApplication.processEvents()
-            else:
-                self.gaze_line_actor = self.plotter.add_lines(gaze_line, color="green", width=3)
+        A, B = self.latest_gaze_line if self.latest_gaze_line is not None else (None, None)
+        if A is None or B is None:
+            return
 
-            self.last_gaze_line = gaze_line
+        direction = B - A
+        norm_direction = direction / np.linalg.norm(direction)
 
-            if "roi" in gaze_data and gaze_data["roi"] is not None:
-                try:
-                    roi_center, roi_radius = gaze_data["roi"]
-                    roi_radius = float(roi_radius)
-                    disc_center = A + 0.5 * direction
-                    disc = pv.Disc(center=disc_center, inner=0, outer=roi_radius, normal=norm_direction, r_res=1, c_res=100)
-                    self.plotter.add_mesh(disc, color="yellow", opacity=0.5)
+        self.plotter.clear()
+        self.plotter.add_mesh(self.line_mesh, color="green", line_width=3)
+        self.plotter.show_axes()
+        self.plotter.show_grid()
 
-                    cone_length = float(np.linalg.norm(disc_center - A))
-                    cone = pv.Cone(center=A, direction=norm_direction, height=cone_length, radius=roi_radius)
-                    self.plotter.add_mesh(cone, color="orange", opacity=0.3)
-                except Exception as e:
-                    print(f"[Gaze] Failed to draw ROI and cone: {e}")
+        # Draw ROI disc and cone
+        if "roi" in gaze_data and gaze_data["roi"] is not None:
+            try:
+                roi_center, roi_radius = gaze_data["roi"]
+                roi_radius = float(roi_radius)
+                disc_center = A + 0.5 * direction
+                disc = pv.Disc(center=disc_center, inner=0, outer=roi_radius, normal=norm_direction, r_res=1, c_res=100)
+                self.plotter.add_mesh(disc, color="yellow", opacity=0.5)
 
-            if "pegs" in gaze_data:
-                try:
-                    original_pegs = np.array(gaze_data["pegs"])
-                    idx = self.matrix_group.checkedId()
-                    if 0 <= idx < len(self.transform_matrices):
-                        matrix = self.transform_matrices[idx]
-                        transformed_pegs = []
-                        for pt in original_pegs:
-                            pt_h = np.append(pt, 1.0)
-                            transformed = matrix @ pt_h
-                            transformed_pegs.append(transformed[:3])
-                        pegs = np.array(transformed_pegs)
-                    else:
-                        pegs = original_pegs
+                cone_length = float(np.linalg.norm(disc_center - A))
+                cone = pv.Cone(center=A, direction=norm_direction, height=cone_length, radius=roi_radius)
+                self.plotter.add_mesh(cone, color="orange", opacity=0.3)
+            except Exception as e:
+                print(f"[Gaze] Failed to draw ROI and cone: {e}")
 
-                    closest_peg = None
-                    closest_point = None
-                    min_dist = float("inf")
+        # Draw pegs and intercept line
+        if "pegs" in gaze_data:
+            try:
+                original_pegs = np.array(gaze_data["pegs"])
+                idx = self.matrix_group.checkedId()
+                if 0 <= idx < len(self.transform_matrices):
+                    matrix = self.transform_matrices[idx]
+                    transformed_pegs = []
+                    for pt in original_pegs:
+                        pt_h = np.append(pt, 1.0)
+                        transformed = matrix @ pt_h
+                        transformed_pegs.append(transformed[:3])
+                    pegs = np.array(transformed_pegs)
+                else:
+                    pegs = original_pegs
 
-                    def point_line_distance(p, a, b):
-                        ap = p - a
-                        ab = b - a
-                        t = max(0, min(1, np.dot(ap, ab) / np.dot(ab, ab)))
-                        closest = a + t * ab
-                        return np.linalg.norm(p - closest), closest
+                closest_peg = None
+                closest_point = None
+                min_dist = float("inf")
 
-                    for peg in pegs:
-                        dist, proj = point_line_distance(peg, A, B)
-                        if dist < min_dist:
-                            min_dist = dist
-                            closest_point = proj
-                            closest_peg = peg
+                def point_line_distance(p, a, b):
+                    ap = p - a
+                    ab = b - a
+                    t = max(0, min(1, np.dot(ap, ab) / np.dot(ab, ab)))
+                    closest = a + t * ab
+                    return np.linalg.norm(p - closest), closest
 
-                    for peg in pegs:
-                        is_closest = closest_peg is not None and np.allclose(peg, closest_peg)
-                        color = "red" if is_closest else "blue"
-                        self.plotter.add_points(np.array([peg]), color=color, point_size=12, render_points_as_spheres=True)
+                for peg in pegs:
+                    dist, proj = point_line_distance(peg, A, B)
+                    if dist < min_dist:
+                        min_dist = dist
+                        closest_point = proj
+                        closest_peg = peg
 
-                    if closest_point is not None and closest_peg is not None:
-                        segments = 20
-                        dashed_points = np.linspace(closest_point, closest_peg, segments * 2).reshape(-1, 2, 3)
-                        for i, (start, end) in enumerate(dashed_points):
-                            if i % 2 == 0:
-                                self.plotter.add_lines(np.array([start, end]), color="red", width=2)
-                except Exception as e:
-                    print(f"[Gaze] Failed to draw pegs: {e}")
-        except Exception as e:
-            print(f"[GazeTrackingWindow] Failed to update visual: {e}")
+                for peg in pegs:
+                    is_closest = closest_peg is not None and np.allclose(peg, closest_peg)
+                    color = "red" if is_closest else "blue"
+                    self.plotter.add_points(np.array([peg]), color=color, point_size=12, render_points_as_spheres=True)
+
+                if closest_point is not None and closest_peg is not None:
+                    segments = 20
+                    dashed_points = np.linspace(closest_point, closest_peg, segments * 2).reshape(-1, 2, 3)
+                    for i, (start, end) in enumerate(dashed_points):
+                        if i % 2 == 0:
+                            self.plotter.add_lines(np.array([start, end]), color="red", width=2)
+            except Exception as e:
+                print(f"[Gaze] Failed to draw pegs: {e}")
+
+
+
+    def _update_gaze_line_actor(self):
+        if self.latest_gaze_line is None or len(self.latest_gaze_line) != 2:
+            return
+
+        points = np.array(self.latest_gaze_line)
+        if points.shape != (2, 3):
+            return
+
+        # Update line geometry
+        self.line_mesh.points = pv.pyvista_ndarray(points)
+        self.line_mesh.lines = np.array([2, 0, 1])  # VTK line: n_points, i0, i1
+        self.line_mesh.modified()
+        self.plotter.render()
 
 
     def reset_view(self):
