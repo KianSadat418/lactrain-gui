@@ -197,60 +197,60 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         self.plotter.show_grid()
 
     def update_gaze_visual(self, gaze_data: dict):
-        self.current_gaze_data = gaze_data
+        try:
+            self.current_gaze_data = gaze_data
+            gaze_line = np.array(gaze_data["gaze_line"])
+            if gaze_line.shape != (2, 3):
+                print(f"[Gaze] Invalid gaze line shape: {gaze_line.shape}")
+                return
 
-        # Update the cached gaze line for animation
-        if "gaze_line" in gaze_data:
-            line = np.array(gaze_data["gaze_line"])
-            if line.shape == (2, 3):
-                self.latest_gaze_line = line
+            A, B = gaze_line[0], gaze_line[1]
+            direction = B - A
+            norm_direction = direction / np.linalg.norm(direction)
 
-        A, B = self.latest_gaze_line if self.latest_gaze_line is not None else (None, None)
-        if A is None or B is None:
-            return
+            # Update or create gaze line
+            if hasattr(self, "line_mesh") and self.line_mesh is not None:
+                self.line_mesh.points = pv.pyvista_ndarray(gaze_line)
+                self.line_mesh.lines = np.array([2, 0, 1])
+                self.line_mesh.modified()
+            else:
+                self.line_mesh = pv.PolyData()
+                self.line_mesh.points = pv.pyvista_ndarray(gaze_line)
+                self.line_mesh.lines = np.array([2, 0, 1])
+                self.gaze_line_actor = self.plotter.add_mesh(self.line_mesh, color="green", line_width=3)
 
-        direction = B - A
-        norm_direction = direction / np.linalg.norm(direction)
+            # Remove old disc/cone actors if they exist
+            if hasattr(self, "roi_actor") and self.roi_actor:
+                self.plotter.remove_actor(self.roi_actor)
+            if hasattr(self, "cone_actor") and self.cone_actor:
+                self.plotter.remove_actor(self.cone_actor)
 
-        self.plotter.clear()
-        self.plotter.add_mesh(self.line_mesh, color="green", line_width=3)
-        self.plotter.show_axes()
-        self.plotter.show_grid()
-
-        # Draw ROI disc and cone
-        if "roi" in gaze_data and gaze_data["roi"] is not None:
-            try:
+            # ROI disc + cone
+            if "roi" in gaze_data and gaze_data["roi"] is not None:
                 roi_center, roi_radius = gaze_data["roi"]
                 roi_radius = float(roi_radius)
                 disc_center = A + 0.5 * direction
                 disc = pv.Disc(center=disc_center, inner=0, outer=roi_radius, normal=norm_direction, r_res=1, c_res=100)
-                self.plotter.add_mesh(disc, color="yellow", opacity=0.5)
+                self.roi_actor = self.plotter.add_mesh(disc, color="yellow", opacity=0.5)
 
                 cone_length = float(np.linalg.norm(disc_center - A))
                 cone = pv.Cone(center=A, direction=norm_direction, height=cone_length, radius=roi_radius)
-                self.plotter.add_mesh(cone, color="orange", opacity=0.3)
-            except Exception as e:
-                print(f"[Gaze] Failed to draw ROI and cone: {e}")
+                self.cone_actor = self.plotter.add_mesh(cone, color="orange", opacity=0.3)
 
-        # Draw pegs and intercept line
-        if "pegs" in gaze_data:
-            try:
+            # Pegs
+            if "pegs" in gaze_data:
+                for actor in getattr(self, "peg_actors", []):
+                    self.plotter.remove_actor(actor)
+                self.peg_actors = []
+
                 original_pegs = np.array(gaze_data["pegs"])
                 idx = self.matrix_group.checkedId()
                 if 0 <= idx < len(self.transform_matrices):
                     matrix = self.transform_matrices[idx]
-                    transformed_pegs = []
-                    for pt in original_pegs:
-                        pt_h = np.append(pt, 1.0)
-                        transformed = matrix @ pt_h
-                        transformed_pegs.append(transformed[:3])
-                    pegs = np.array(transformed_pegs)
+                    pegs = [matrix @ np.append(p, 1.0) for p in original_pegs]
+                    pegs = np.array([p[:3] for p in pegs])
                 else:
                     pegs = original_pegs
-
-                closest_peg = None
-                closest_point = None
-                min_dist = float("inf")
 
                 def point_line_distance(p, a, b):
                     ap = p - a
@@ -259,17 +259,19 @@ class GazeTrackingWindow(QtWidgets.QWidget):
                     closest = a + t * ab
                     return np.linalg.norm(p - closest), closest
 
+                closest_peg, closest_point, min_dist = None, None, float("inf")
                 for peg in pegs:
                     dist, proj = point_line_distance(peg, A, B)
                     if dist < min_dist:
                         min_dist = dist
-                        closest_point = proj
                         closest_peg = peg
+                        closest_point = proj
 
                 for peg in pegs:
                     is_closest = closest_peg is not None and np.allclose(peg, closest_peg)
                     color = "red" if is_closest else "blue"
-                    self.plotter.add_points(np.array([peg]), color=color, point_size=12, render_points_as_spheres=True)
+                    actor = self.plotter.add_points(np.array([peg]), color=color, point_size=12, render_points_as_spheres=True)
+                    self.peg_actors.append(actor)
 
                 if closest_point is not None and closest_peg is not None:
                     segments = 20
@@ -277,10 +279,12 @@ class GazeTrackingWindow(QtWidgets.QWidget):
                     for i, (start, end) in enumerate(dashed_points):
                         if i % 2 == 0:
                             self.plotter.add_lines(np.array([start, end]), color="red", width=2)
-            except Exception as e:
-                print(f"[Gaze] Failed to draw pegs: {e}")
 
+            self.plotter.render()
+            QtWidgets.QApplication.processEvents()
 
+        except Exception as e:
+            print(f"[GazeTracking] Failed to update: {e}")
 
     def _update_gaze_line_actor(self):
         if self.latest_gaze_line is None or len(self.latest_gaze_line) != 2:
