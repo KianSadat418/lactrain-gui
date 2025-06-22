@@ -7,6 +7,7 @@ import numpy as np
 import PyQt5.QtCore as QtCore
 import PyQt5.QtWidgets as QtWidgets
 import pyvista as pv
+pv.global_theme.allow_empty_mesh = True
 from pyvistaqt import QtInteractor
 
 MATRIX_BUTTON_LABELS = [
@@ -464,7 +465,7 @@ class MainWindow(QtWidgets.QWidget):
             self.peg_validation_actor = self.plotter.add_points(
                 np.array([point]),
                 color="purple",
-                point_size=14,
+                point_size=12,
                 render_points_as_spheres=True
             )
 
@@ -477,8 +478,8 @@ class MainWindow(QtWidgets.QWidget):
 
                 self.plotter.add_points(
                     np.array([transformed_point]),
-                    color="#300053",
-                    point_size=14,
+                    color="#3E006A",
+                    point_size=12,
                     render_points_as_spheres=True
                 )
 
@@ -629,7 +630,7 @@ class MainWindow(QtWidgets.QWidget):
             self.plotter.add_points(
                 np.vstack(self.camera_points),
                 color="red",
-                point_size=14,
+                point_size=12,
                 opacity=1.0 if self.cam_checkbox.isChecked() else 0.0,
                 render_points_as_spheres=True,
             )
@@ -638,7 +639,7 @@ class MainWindow(QtWidgets.QWidget):
             self.plotter.add_points(
                 np.vstack(self.holo_points),
                 color="blue",
-                point_size=14,
+                point_size=12,
                 opacity=1.0 if self.holo_checkbox.isChecked() else 0.0,
                 render_points_as_spheres=True,
             )
@@ -648,21 +649,21 @@ class MainWindow(QtWidgets.QWidget):
                 self.plotter.add_points(
                     np.vstack(self.matrix_transform_points),
                     color="green",  # transformed camera points
-                    point_size=14,
+                    point_size=12,
                     render_points_as_spheres=True,
                 )
             if self.manual_points:
                 self.plotter.add_points(
                     np.vstack(self.manual_points),
-                    color="yellow",  # manual point
-                    point_size=14,
+                    color="#CBCB00",  # manual point
+                    point_size=12,
                     render_points_as_spheres=True,
                 )
             if self.manual_transformed_points:
                 self.plotter.add_points(
                     np.vstack(self.manual_transformed_points),
-                    color="#5F5F00",  # dark yellow for manual transform
-                    point_size=14,
+                    color="#BD7E00",  # dark yellow for manual transform
+                    point_size=12,
                     render_points_as_spheres=True,
                 )
 
