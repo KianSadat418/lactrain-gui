@@ -383,10 +383,13 @@ class MainWindow(QtWidgets.QWidget):
         fields_layout.addWidget(self.transform_x)
         fields_layout.addWidget(self.transform_y)
         fields_layout.addWidget(self.transform_z)
-        self.transform_apply = QtWidgets.QPushButton("Apply")
+        self.transform_apply = QtWidgets.QPushButton("Create Point")
         transform_layout.addWidget(self.transform_checkbox)
         self.clear_transform_button = QtWidgets.QPushButton("Clear Transform Points")
         transform_layout.addWidget(self.clear_transform_button)
+        self.load_matrices_button = QtWidgets.QPushButton("Load Matrices")
+        transform_layout.addWidget(self.load_matrices_button)
+        self.load_matrices_button.clicked.connect(self.load_matrices_from_file)
 
         self.matrix_buttons = []
         self.matrix_group = QtWidgets.QButtonGroup()
@@ -478,7 +481,7 @@ class MainWindow(QtWidgets.QWidget):
 
                 self.plotter.add_points(
                     np.array([transformed_point]),
-                    color="#3E006A",
+                    color="#300053",
                     point_size=12,
                     render_points_as_spheres=True
                 )
@@ -604,6 +607,9 @@ class MainWindow(QtWidgets.QWidget):
         self.manual_transformed_points.clear()
         self.update_scene()
 
+    def load_matrices_from_file(self):
+        self.handle_matrix_mode()
+
     def _zoom(self, factor: float):
         camera = self.plotter.camera
         if hasattr(camera, "Zoom"):
@@ -662,7 +668,7 @@ class MainWindow(QtWidgets.QWidget):
             if self.manual_transformed_points:
                 self.plotter.add_points(
                     np.vstack(self.manual_transformed_points),
-                    color="#BD7E00",  # dark yellow for manual transform
+                    color="#C48300",  # dark yellow for manual transform
                     point_size=12,
                     render_points_as_spheres=True,
                 )
