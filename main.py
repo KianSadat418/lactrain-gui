@@ -53,6 +53,20 @@ class DataReceiver(QtCore.QThread):
                         x, y, z = float(data["x"]), float(data["y"]), float(data["z"])
                         point = np.array([x, y, z])
                         self.peg_point_received.emit(point)
+
+                        # Additional gaze-related fields
+                        gaze_line = np.array(data.get("gaze_line"))
+                        roi_radius = float(data.get("roi", 0.0))
+                        intercept = bool(data.get("intercept", False))
+
+                        # Send visual data to main window
+                        QtCore.QMetaObject.invokeMethod(
+                            self.parent(), "update_validation_gaze",
+                            QtCore.Qt.QueuedConnection,
+                            QtCore.Q_ARG(object, gaze_line),
+                            QtCore.Q_ARG(float, roi_radius),
+                            QtCore.Q_ARG(bool, intercept)
+                        )
                     except Exception as e:
                         print(f"[Receiver] Error parsing or handling V message: {e}")
                 elif line.startswith("G"):
@@ -135,6 +149,8 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         self.line_mesh = pv.PolyData()
         self.line_actor = self.plotter.add_mesh(self.line_mesh, color="green", line_width=3, render=False)
         self.gaze_line_actor = None
+        self.validation_line_mesh = pv.PolyData()
+        self.validation_gaze_line_actor = self.plotter.add_mesh(self.validation_line_mesh, color="green", line_width=3)
 
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self._update_gaze_line_actor)
@@ -487,6 +503,35 @@ class MainWindow(QtWidgets.QWidget):
                 )
 
         self.plotter.render()
+
+    @QtCore.pyqtSlot(object, float, bool)
+    def update_validation_gaze(self, gaze_line, roi_radius, intercept):
+        try:
+            color = "red" if intercept else "green"
+
+            # Update gaze line in-place
+            self.validation_line_mesh.points = pv.pyvista_ndarray(gaze_line)
+            self.validation_line_mesh.lines = np.array([2, 0, 1])
+            self.validation_line_mesh.modified()
+            self.plotter.update_scalars(None, render=False)
+            self.validation_gaze_line_actor.prop.set_color(color)
+
+            # Remove old disc if needed
+            if hasattr(self, "validation_roi_actor") and self.validation_roi_actor:
+                self.plotter.remove_actor(self.validation_roi_actor)
+
+            # ROI disc
+            A, B = gaze_line
+            direction = B - A
+            norm_direction = direction / np.linalg.norm(direction)
+            disc_center = A + 0.5 * direction
+            disc = pv.Disc(center=disc_center, inner=0, outer=roi_radius, normal=norm_direction, r_res=1, c_res=100)
+            self.validation_roi_actor = self.plotter.add_mesh(disc, color="yellow", opacity=0.5)
+
+            self.plotter.render()
+        except Exception as e:
+            print(f"[MainWindow] Failed to update validation gaze visuals: {e}")
+
 
     @QtCore.pyqtSlot(dict)
     def receive_gaze_data(self, gaze_data: dict):
