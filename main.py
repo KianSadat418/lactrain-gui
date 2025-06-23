@@ -7,6 +7,7 @@ import numpy as np
 import PyQt5.QtCore as QtCore
 import PyQt5.QtWidgets as QtWidgets
 import pyvista as pv
+from pyvista import Color
 pv.global_theme.allow_empty_mesh = True
 from pyvistaqt import QtInteractor
 
@@ -371,7 +372,7 @@ class MainWindow(QtWidgets.QWidget):
         self.rmse_label = QtWidgets.QLabel("RMSE: N/A")
 
         self.latest_validation_gaze = None
-        self.latest_validation_roi = 0.0
+        self.fixed_validation_roi = None
         self.latest_validation_intercept = 0
 
         self.validation_line_mesh = pv.PolyData()
@@ -493,7 +494,8 @@ class MainWindow(QtWidgets.QWidget):
 
         try:
             self.latest_validation_gaze = np.array(gaze_line)
-            self.latest_validation_roi = roi
+            if self.fixed_validation_roi is None:
+                self.fixed_validation_roi = roi
             self.latest_validation_intercept = intercept
             color = "red" if intercept else "green"
 
@@ -502,7 +504,7 @@ class MainWindow(QtWidgets.QWidget):
             self.validation_line_mesh.lines = np.array([2, 0, 1])
             self.validation_line_mesh.Modified()
             self.plotter.update_scalars(None, render=False)
-            self.validation_gaze_line_actor.prop.set_color(color)
+            self.validation_gaze_line_actor.GetProperty().SetColor(Color(color).float_rgb)
 
             # Remove old disc if needed
             if hasattr(self, "validation_roi_actor") and self.validation_roi_actor:
@@ -527,7 +529,7 @@ class MainWindow(QtWidgets.QWidget):
             return
 
         A, B = self.latest_validation_gaze
-        roi = self.latest_validation_roi
+        roi = self.fixed_validation_roi if self.fixed_validation_roi is not None else 0.0
         direction = B - A
         norm_direction = direction / np.linalg.norm(direction)
 
@@ -585,12 +587,14 @@ class MainWindow(QtWidgets.QWidget):
                     self.peg_transformed_mesh.Modified()
 
                 # Transparent ROI sphere at transformed peg
-                if hasattr(self, "validation_sphere_actor"):
-                    self.plotter.remove_actor(self.validation_sphere_actor)
-                self.validation_sphere_actor = self.plotter.add_mesh(
-                    pv.Sphere(radius=roi, center=transformed),
-                    color="green", opacity=0.2
-                )
+                if not hasattr(self, "validation_sphere_mesh"):
+                    self.validation_sphere_mesh = pv.Sphere(radius=self.latest_validation_roi, center=transformed)
+                    self.validation_sphere_actor = self.plotter.add_mesh(
+                        self.validation_sphere_mesh, color="green", opacity=0.2
+                    )
+                else:
+                    self.validation_sphere_mesh.center = transformed
+                    self.validation_sphere_mesh.Modified()
 
         self.plotter.render()
 
