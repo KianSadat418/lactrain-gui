@@ -408,7 +408,7 @@ class MainWindow(QtWidgets.QWidget):
 
         self.validation_gaze_timer = QtCore.QTimer()
         self.validation_gaze_timer.timeout.connect(self._update_validation_gaze_line)
-        self.validation_gaze_timer.start(100)  # update every 100 ms
+        self.validation_gaze_timer.start(50)  # update every 50 ms
 
         # Right side configuration panel
         options_group = QtWidgets.QGroupBox("Options")
