@@ -229,7 +229,7 @@ class GazeTrackingWindow(QtWidgets.QWidget):
             if hasattr(self, "line_mesh") and self.line_mesh is not None:
                 self.line_mesh.points = pv.pyvista_ndarray(gaze_line)
                 self.line_mesh.lines = np.array([2, 0, 1])
-                self.line_mesh.modified()
+                self.line_mesh.Modified()
             else:
                 self.line_mesh = pv.PolyData()
                 self.line_mesh.points = pv.pyvista_ndarray(gaze_line)
@@ -314,7 +314,7 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         # Update line geometry
         self.line_mesh.points = pv.pyvista_ndarray(points)
         self.line_mesh.lines = np.array([2, 0, 1])  # VTK line: n_points, i0, i1
-        self.line_mesh.modified()
+        self.line_mesh.Modified()
         self.plotter.render()
 
 
@@ -488,7 +488,7 @@ class MainWindow(QtWidgets.QWidget):
             )
         else:
             self.peg_validation_mesh.points = point.reshape(1, 3)
-            self.peg_validation_mesh.modified()
+            self.peg_validation_mesh.Modified()
 
         # --- Transformed peg point ---
         idx = self.matrix_group.checkedId()
@@ -507,7 +507,7 @@ class MainWindow(QtWidgets.QWidget):
                 )
             else:
                 self.peg_transformed_mesh.points = transformed_point.reshape(1, 3)
-                self.peg_transformed_mesh.modified()
+                self.peg_transformed_mesh.Modified()
 
         self.plotter.render()
 
@@ -519,7 +519,7 @@ class MainWindow(QtWidgets.QWidget):
             # Update gaze line in-place
             self.validation_line_mesh.points = pv.pyvista_ndarray(gaze_line)
             self.validation_line_mesh.lines = np.array([2, 0, 1])
-            self.validation_line_mesh.modified()
+            self.validation_line_mesh.Modified()
             self.plotter.update_scalars(None, render=False)
             self.validation_gaze_line_actor.prop.set_color(color)
 
