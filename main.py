@@ -220,18 +220,27 @@ class GazeTrackingWindow(QtWidgets.QWidget):
                 print(f"[Gaze] Invalid gaze line shape: {gaze_line.shape}")
                 return
 
-            A, B = gaze_line[0], gaze_line[1]
-            direction = B - A
-            norm_direction = direction / np.linalg.norm(direction)
+            origin = gaze_line[0]
+            direction = gaze_line[1]
+            length = np.linalg.norm(direction)
+            if length == 0:
+                target = origin
+                norm_direction = np.array([0.0, 0.0, 0.0])
+            else:
+                norm_direction = direction / length
+                target = origin + norm_direction * 500.0
+            A, B = origin, target
+            self.latest_gaze_line = [A, B]
 
             # Update or create gaze line
+            line_points = np.array([A, B])
             if hasattr(self, "line_mesh") and self.line_mesh is not None:
-                self.line_mesh.points = pv.pyvista_ndarray(gaze_line)
+                self.line_mesh.points = pv.pyvista_ndarray(line_points)
                 self.line_mesh.lines = np.array([2, 0, 1])
                 self.line_mesh.Modified()
             else:
                 self.line_mesh = pv.PolyData()
-                self.line_mesh.points = pv.pyvista_ndarray(gaze_line)
+                self.line_mesh.points = pv.pyvista_ndarray(line_points)
                 self.line_mesh.lines = np.array([2, 0, 1])
                 self.gaze_line_actor = self.plotter.add_mesh(self.line_mesh, color="green", line_width=3)
 
@@ -245,7 +254,7 @@ class GazeTrackingWindow(QtWidgets.QWidget):
             if "roi" in gaze_data and gaze_data["roi"] is not None:
                 roi_center, roi_radius = gaze_data["roi"]
                 roi_radius = float(roi_radius)
-                disc_center = A + 0.5 * direction
+                disc_center = A + 0.5 * (B - A)
                 disc = pv.Disc(center=disc_center, inner=0, outer=roi_radius, normal=norm_direction, r_res=1, c_res=100)
                 self.roi_actor = self.plotter.add_mesh(disc, color="yellow", opacity=0.5)
 
@@ -499,7 +508,14 @@ class MainWindow(QtWidgets.QWidget):
             if gaze_arr.shape != (2, 3):
                 print(f"[MainWindow] Invalid validation gaze shape: {gaze_arr.shape}")
                 return
-            self.latest_validation_gaze = gaze_arr
+            origin = gaze_arr[0]
+            direction = gaze_arr[1]
+            length = np.linalg.norm(direction)
+            if length == 0:
+                target = origin
+            else:
+                target = origin + (direction / length) * 500.0
+            self.latest_validation_gaze = np.array([origin, target])
             self.latest_validation_roi = float(roi)
             self.latest_validation_intercept = int(intercept)
 
