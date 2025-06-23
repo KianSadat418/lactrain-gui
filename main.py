@@ -20,7 +20,7 @@ MATRIX_BUTTON_LABELS = [
 
 # Length of the gaze ray and radius of the disc at the end of the line
 GAZE_LINE_LENGTH = 500.0
-DISC_RADIUS = 50
+DISC_RADIUS = 20.0
 
 class DataReceiver(QtCore.QThread):
     updated_points = QtCore.pyqtSignal(list, list)
