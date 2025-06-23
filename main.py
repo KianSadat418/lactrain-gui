@@ -57,7 +57,7 @@ class DataReceiver(QtCore.QThread):
                         # Additional gaze-related fields
                         gaze_line = np.array(data.get("gaze_line"))
                         roi_radius = float(data.get("roi", 0.0))
-                        intercept = bool(data.get("intercept", False))
+                        intercept = int(data.get("intercept", 0))
 
                         # Send visual data to main window
                         QtCore.QMetaObject.invokeMethod(
@@ -65,7 +65,7 @@ class DataReceiver(QtCore.QThread):
                             QtCore.Qt.QueuedConnection,
                             QtCore.Q_ARG(object, gaze_line),
                             QtCore.Q_ARG(float, roi_radius),
-                            QtCore.Q_ARG(bool, intercept)
+                            QtCore.Q_ARG(int, intercept)
                         )
                     except Exception as e:
                         print(f"[Receiver] Error parsing or handling V message: {e}")
