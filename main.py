@@ -20,7 +20,7 @@ MATRIX_BUTTON_LABELS = [
 
 # Length of the gaze ray and radius of the disc at the end of the line
 GAZE_LINE_LENGTH = 500.0
-DISC_RADIUS = 20.0
+DISC_RADIUS = 50
 
 class DataReceiver(QtCore.QThread):
     updated_points = QtCore.pyqtSignal(list, list)
@@ -408,7 +408,7 @@ class MainWindow(QtWidgets.QWidget):
 
         self.validation_gaze_timer = QtCore.QTimer()
         self.validation_gaze_timer.timeout.connect(self._update_validation_gaze_line)
-        self.validation_gaze_timer.start(50)  # update every 50 ms
+        self.validation_gaze_timer.start(20)  # update every 50 ms
 
         # Right side configuration panel
         options_group = QtWidgets.QGroupBox("Options")
