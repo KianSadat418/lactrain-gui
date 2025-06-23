@@ -149,8 +149,6 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         self.line_mesh = pv.PolyData()
         self.line_actor = self.plotter.add_mesh(self.line_mesh, color="green", line_width=3, render=False)
         self.gaze_line_actor = None
-        self.validation_line_mesh = pv.PolyData()
-        self.validation_gaze_line_actor = self.plotter.add_mesh(self.validation_line_mesh, color="green", line_width=3)
 
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self._update_gaze_line_actor)
@@ -371,6 +369,12 @@ class MainWindow(QtWidgets.QWidget):
         self.zoom_in_button = QtWidgets.QPushButton("+")
         self.zoom_out_button = QtWidgets.QPushButton("-")
         self.rmse_label = QtWidgets.QLabel("RMSE: N/A")
+        self.validation_line_mesh = pv.PolyData()
+        self.validation_gaze_line_actor = self.plotter.add_mesh(self.validation_line_mesh, color="green", line_width=3)
+
+        self.validation_gaze_timer = QtCore.QTimer()
+        self.validation_gaze_timer.timeout.connect(self._update_validation_gaze_line)
+        self.validation_gaze_timer.start(50)  # update every 50 ms
 
         # Right side configuration panel
         options_group = QtWidgets.QGroupBox("Options")
@@ -511,13 +515,13 @@ class MainWindow(QtWidgets.QWidget):
 
         self.plotter.render()
 
-    @QtCore.pyqtSlot(object, float, bool)
+    @QtCore.pyqtSlot(object, float, int)
     def update_validation_gaze(self, gaze_line, roi_radius, intercept):
         try:
             color = "red" if intercept else "green"
 
             # Update gaze line in-place
-            self.validation_line_mesh.points = pv.pyvista_ndarray(gaze_line)
+            self.latest_validation_gaze = np.array(gaze_line)
             self.validation_line_mesh.lines = np.array([2, 0, 1])
             self.validation_line_mesh.Modified()
             self.plotter.update_scalars(None, render=False)
@@ -539,6 +543,14 @@ class MainWindow(QtWidgets.QWidget):
         except Exception as e:
             print(f"[MainWindow] Failed to update validation gaze visuals: {e}")
 
+    def _update_validation_gaze_line(self):
+        if hasattr(self, "latest_validation_gaze") and self.latest_validation_gaze is not None:
+            points = self.latest_validation_gaze
+            if isinstance(points, np.ndarray) and points.shape == (2, 3):
+                self.validation_line_mesh.points = pv.pyvista_ndarray(points)
+                self.validation_line_mesh.lines = np.array([2, 0, 1])
+                self.validation_line_mesh.Modified()
+                self.plotter.render()
 
     @QtCore.pyqtSlot(dict)
     def receive_gaze_data(self, gaze_data: dict):
