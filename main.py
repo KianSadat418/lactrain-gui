@@ -146,9 +146,9 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         self.plotter = QtInteractor(self)
 
         self.latest_gaze_line = None
+        self.gaze_line_actor = None
         self.line_mesh = pv.PolyData()
         self.line_actor = self.plotter.add_mesh(self.line_mesh, color="green", line_width=3, render=False)
-        self.gaze_line_actor = None
 
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self._update_gaze_line_actor)
@@ -370,11 +370,11 @@ class MainWindow(QtWidgets.QWidget):
         self.zoom_out_button = QtWidgets.QPushButton("-")
         self.rmse_label = QtWidgets.QLabel("RMSE: N/A")
         self.validation_line_mesh = pv.PolyData()
-        self.validation_gaze_line_actor = self.plotter.add_mesh(self.validation_line_mesh, color="green", line_width=3)
+        self.validation_gaze_line_actor = self.plotter.add_mesh(self.validation_line_mesh, color="green", line_width=3, render=False)
 
         self.validation_gaze_timer = QtCore.QTimer()
         self.validation_gaze_timer.timeout.connect(self._update_validation_gaze_line)
-        self.validation_gaze_timer.start(50)  # update every 50 ms
+        self.validation_gaze_timer.start(100)  # update every 100 ms
 
         # Right side configuration panel
         options_group = QtWidgets.QGroupBox("Options")
@@ -479,41 +479,9 @@ class MainWindow(QtWidgets.QWidget):
 
     @QtCore.pyqtSlot(np.ndarray)
     def set_peg_validation_point(self, point):
+        """Store the latest peg validation point for rendering via timer."""
         self.peg_validation_point = point
-
-        # --- Real (raw) peg point ---
-        if not hasattr(self, "peg_validation_mesh"):
-            self.peg_validation_mesh = pv.PolyData(point.reshape(1, 3))
-            self.peg_validation_actor = self.plotter.add_mesh(
-                self.peg_validation_mesh,
-                color="purple",
-                point_size=12,
-                render_points_as_spheres=True
-            )
-        else:
-            self.peg_validation_mesh.points = point.reshape(1, 3)
-            self.peg_validation_mesh.Modified()
-
-        # --- Transformed peg point ---
-        idx = self.matrix_group.checkedId()
-        if 0 <= idx < len(self.transform_matrices):
-            matrix = self.transform_matrices[idx]
-            pt_h = np.append(point, 1.0)
-            transformed_point = (matrix @ pt_h)[:3]
-
-            if not hasattr(self, "peg_transformed_mesh"):
-                self.peg_transformed_mesh = pv.PolyData(transformed_point.reshape(1, 3))
-                self.peg_transformed_actor = self.plotter.add_mesh(
-                    self.peg_transformed_mesh,
-                    color="#300053",  # dark purple
-                    point_size=12,
-                    render_points_as_spheres=True
-                )
-            else:
-                self.peg_transformed_mesh.points = transformed_point.reshape(1, 3)
-                self.peg_transformed_mesh.Modified()
-
-        self.plotter.render()
+        # Mesh updates are now handled in the _update_validation_gaze_line method via timer.
 
     @QtCore.pyqtSlot(object, float, int)
     def update_validation_gaze(self, gaze_line, roi_radius, intercept):
@@ -544,13 +512,51 @@ class MainWindow(QtWidgets.QWidget):
             print(f"[MainWindow] Failed to update validation gaze visuals: {e}")
 
     def _update_validation_gaze_line(self):
+        # --- Update validation gaze line ---
         if hasattr(self, "latest_validation_gaze") and self.latest_validation_gaze is not None:
             points = self.latest_validation_gaze
             if isinstance(points, np.ndarray) and points.shape == (2, 3):
                 self.validation_line_mesh.points = pv.pyvista_ndarray(points)
                 self.validation_line_mesh.lines = np.array([2, 0, 1])
                 self.validation_line_mesh.Modified()
-                self.plotter.render()
+
+        # --- Update validation peg point (real and transformed) ---
+        if self.peg_validation_point is not None:
+            point = self.peg_validation_point
+
+            # Real point
+            if not hasattr(self, "peg_validation_mesh"):
+                self.peg_validation_mesh = pv.PolyData(point.reshape(1, 3))
+                self.peg_validation_actor = self.plotter.add_mesh(
+                    self.peg_validation_mesh,
+                    color="purple",
+                    point_size=12,
+                    render_points_as_spheres=True
+                )
+            else:
+                self.peg_validation_mesh.points = point.reshape(1, 3)
+                self.peg_validation_mesh.Modified()
+
+            # Transformed point
+            idx = self.matrix_group.checkedId()
+            if 0 <= idx < len(self.transform_matrices):
+                matrix = self.transform_matrices[idx]
+                pt_h = np.append(point, 1.0)
+                transformed = (matrix @ pt_h)[:3]
+
+                if not hasattr(self, "peg_transformed_mesh"):
+                    self.peg_transformed_mesh = pv.PolyData(transformed.reshape(1, 3))
+                    self.peg_transformed_actor = self.plotter.add_mesh(
+                        self.peg_transformed_mesh,
+                        color="#300053",  # dark purple
+                        point_size=12,
+                        render_points_as_spheres=True
+                    )
+                else:
+                    self.peg_transformed_mesh.points = transformed.reshape(1, 3)
+                    self.peg_transformed_mesh.Modified()
+
+        self.plotter.render()
 
     @QtCore.pyqtSlot(dict)
     def receive_gaze_data(self, gaze_data: dict):
