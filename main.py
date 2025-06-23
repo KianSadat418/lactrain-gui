@@ -385,6 +385,7 @@ class MainWindow(QtWidgets.QWidget):
         self.peg_validation_point = None
         self.peg_validation_actor = None
         self.transform_matrices = []
+        self.fix_view_actors = []
 
         # UI setup
         self.plotter = QtInteractor(self)
@@ -396,7 +397,10 @@ class MainWindow(QtWidgets.QWidget):
         self.holo_checkbox.setChecked(True)
         self.reset_button = QtWidgets.QPushButton("Reset View")
         self.zoom_in_button = QtWidgets.QPushButton("+")
+        self.fix_view_checkbox = QtWidgets.QCheckBox("Fix View")
+        self.fix_view_checkbox.setChecked(False)
         self.zoom_out_button = QtWidgets.QPushButton("-")
+
         self.rmse_label = QtWidgets.QLabel("RMSE: N/A")
 
         self.latest_validation_gaze = None
@@ -466,6 +470,7 @@ class MainWindow(QtWidgets.QWidget):
         view_layout.addWidget(self.reset_button)
         view_layout.addWidget(self.zoom_in_button)
         view_layout.addWidget(self.zoom_out_button)
+        view_layout.addWidget(self.fix_view_checkbox)
         view_group.setLayout(view_layout)
 
         right_layout = QtWidgets.QVBoxLayout()
@@ -492,6 +497,7 @@ class MainWindow(QtWidgets.QWidget):
         self.transform_apply.clicked.connect(self.apply_transform)
         self.clear_transform_button.clicked.connect(self.clear_transform_points)
         self.matrix_apply_button.clicked.connect(self.apply_matrix_transform)
+        self.fix_view_checkbox.stateChanged.connect(self.update_scene)
         self.launch_gaze_button.clicked.connect(self.open_gaze_tracking)
 
         self.receiver = DataReceiver(parent=self)
@@ -841,6 +847,33 @@ class MainWindow(QtWidgets.QWidget):
         ):
             for cam, holo in zip(self.camera_points, self.holo_points):
                 self.draw_dashed_line(cam, holo)
+
+        # Fix View Logic: Add bounding and origin points
+        for actor in self.fix_view_actors:
+            self.plotter.remove_actor(actor)
+        self.fix_view_actors.clear()
+
+        if self.fix_view_checkbox.isChecked():
+            invisible_bounds = np.array([[-100, -100, -100], [600, 600, 600]], dtype=np.float32)
+            origin = np.array([[0, 0, 0]], dtype=np.float32)
+
+            # Invisible bounds (tiny and transparent)
+            bounds_actor = self.plotter.add_points(
+                invisible_bounds,
+                color="white",
+                opacity=0.0,
+                point_size=1,
+                render_points_as_spheres=True
+            )
+            # Visible origin
+            origin_actor = self.plotter.add_points(
+                origin,
+                color="black",
+                point_size=16,
+                render_points_as_spheres=True
+            )
+
+            self.fix_view_actors.extend([bounds_actor, origin_actor])
 
         self.plotter.render()
 
