@@ -369,6 +369,11 @@ class MainWindow(QtWidgets.QWidget):
         self.zoom_in_button = QtWidgets.QPushButton("+")
         self.zoom_out_button = QtWidgets.QPushButton("-")
         self.rmse_label = QtWidgets.QLabel("RMSE: N/A")
+
+        self.latest_validation_gaze = None
+        self.latest_validation_roi = 0.0
+        self.latest_validation_intercept = 0
+
         self.validation_line_mesh = pv.PolyData()
         self.validation_gaze_line_actor = self.plotter.add_mesh(self.validation_line_mesh, color="green", line_width=3, render=False)
 
@@ -484,8 +489,12 @@ class MainWindow(QtWidgets.QWidget):
         # Mesh updates are now handled in the _update_validation_gaze_line method via timer.
 
     @QtCore.pyqtSlot(object, float, int)
-    def update_validation_gaze(self, gaze_line, roi_radius, intercept):
+    def update_validation_gaze(self, gaze_line, roi, intercept):
+
         try:
+            self.latest_validation_gaze = np.array(gaze_line)
+            self.latest_validation_roi = roi
+            self.latest_validation_intercept = intercept
             color = "red" if intercept else "green"
 
             # Update gaze line in-place
@@ -504,7 +513,7 @@ class MainWindow(QtWidgets.QWidget):
             direction = B - A
             norm_direction = direction / np.linalg.norm(direction)
             disc_center = A + 0.5 * direction
-            disc = pv.Disc(center=disc_center, inner=0, outer=roi_radius, normal=norm_direction, r_res=1, c_res=100)
+            disc = pv.Disc(center=disc_center, inner=0, outer=roi, normal=norm_direction, r_res=1, c_res=100)
             self.validation_roi_actor = self.plotter.add_mesh(disc, color="yellow", opacity=0.5)
 
             self.plotter.render()
@@ -512,19 +521,38 @@ class MainWindow(QtWidgets.QWidget):
             print(f"[MainWindow] Failed to update validation gaze visuals: {e}")
 
     def _update_validation_gaze_line(self):
-        # --- Update validation gaze line ---
-        if hasattr(self, "latest_validation_gaze") and self.latest_validation_gaze is not None:
-            points = self.latest_validation_gaze
-            if isinstance(points, np.ndarray) and points.shape == (2, 3):
-                self.validation_line_mesh.points = pv.pyvista_ndarray(points)
-                self.validation_line_mesh.lines = np.array([2, 0, 1])
-                self.validation_line_mesh.Modified()
+        DISC_RADIUS = 0.02 
 
-        # --- Update validation peg point (real and transformed) ---
+        if self.latest_validation_gaze is None:
+            return
+
+        A, B = self.latest_validation_gaze
+        roi = self.latest_validation_roi
+        direction = B - A
+        norm_direction = direction / np.linalg.norm(direction)
+
+        # === 1. Update Line Mesh ===
+        self.validation_line_mesh.points = pv.pyvista_ndarray([A, B])
+        self.validation_line_mesh.lines = np.array([2, 0, 1])
+        self.validation_line_mesh.Modified()
+
+        # === 2. Disc at endpoint ===
+        if hasattr(self, "validation_disc_actor"):
+            self.plotter.remove_actor(self.validation_disc_actor)
+        disc = pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction)
+        self.validation_disc_actor = self.plotter.add_mesh(disc, color="cyan", opacity=0.5)
+
+        # === 3. Cone from A to B ===
+        if hasattr(self, "validation_cone_actor"):
+            self.plotter.remove_actor(self.validation_cone_actor)
+        cone = pv.Cone(center=A, direction=norm_direction, height=float(np.linalg.norm(direction)), radius=roi)
+        self.validation_cone_actor = self.plotter.add_mesh(cone, color="orange", opacity=0.3)
+
+        # --- 4. Validation Peg (real and transformed) with ROI sphere ---
         if self.peg_validation_point is not None:
             point = self.peg_validation_point
 
-            # Real point
+            # Real peg point (purple)
             if not hasattr(self, "peg_validation_mesh"):
                 self.peg_validation_mesh = pv.PolyData(point.reshape(1, 3))
                 self.peg_validation_actor = self.plotter.add_mesh(
@@ -537,7 +565,7 @@ class MainWindow(QtWidgets.QWidget):
                 self.peg_validation_mesh.points = point.reshape(1, 3)
                 self.peg_validation_mesh.Modified()
 
-            # Transformed point
+            # Transformed peg point (dark purple) and transparent ROI sphere
             idx = self.matrix_group.checkedId()
             if 0 <= idx < len(self.transform_matrices):
                 matrix = self.transform_matrices[idx]
@@ -555,6 +583,14 @@ class MainWindow(QtWidgets.QWidget):
                 else:
                     self.peg_transformed_mesh.points = transformed.reshape(1, 3)
                     self.peg_transformed_mesh.Modified()
+
+                # Transparent ROI sphere at transformed peg
+                if hasattr(self, "validation_sphere_actor"):
+                    self.plotter.remove_actor(self.validation_sphere_actor)
+                self.validation_sphere_actor = self.plotter.add_mesh(
+                    pv.Sphere(radius=roi, center=transformed),
+                    color="green", opacity=0.2
+                )
 
         self.plotter.render()
 
