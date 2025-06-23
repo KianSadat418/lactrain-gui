@@ -477,30 +477,37 @@ class MainWindow(QtWidgets.QWidget):
     def set_peg_validation_point(self, point):
         self.peg_validation_point = point
 
-        if self.peg_validation_actor:
-            self.plotter.remove_actor(self.peg_validation_actor)
-
-        if self.transform_checkbox.isChecked():
-            self.peg_validation_actor = self.plotter.add_points(
-                np.array([point]),
+        # --- Real (raw) peg point ---
+        if not hasattr(self, "peg_validation_mesh"):
+            self.peg_validation_mesh = pv.PolyData(point.reshape(1, 3))
+            self.peg_validation_actor = self.plotter.add_mesh(
+                self.peg_validation_mesh,
                 color="purple",
                 point_size=12,
                 render_points_as_spheres=True
             )
+        else:
+            self.peg_validation_mesh.points = point.reshape(1, 3)
+            self.peg_validation_mesh.modified()
 
-            idx = self.matrix_group.checkedId()
-            if 0 <= idx < len(self.transform_matrices):
-                matrix = self.transform_matrices[idx]
-                pt_h = np.append(point, 1.0)
-                transformed = matrix @ pt_h
-                transformed_point = transformed[:3]
+        # --- Transformed peg point ---
+        idx = self.matrix_group.checkedId()
+        if 0 <= idx < len(self.transform_matrices):
+            matrix = self.transform_matrices[idx]
+            pt_h = np.append(point, 1.0)
+            transformed_point = (matrix @ pt_h)[:3]
 
-                self.plotter.add_points(
-                    np.array([transformed_point]),
-                    color="#300053",
+            if not hasattr(self, "peg_transformed_mesh"):
+                self.peg_transformed_mesh = pv.PolyData(transformed_point.reshape(1, 3))
+                self.peg_transformed_actor = self.plotter.add_mesh(
+                    self.peg_transformed_mesh,
+                    color="#300053",  # dark purple
                     point_size=12,
                     render_points_as_spheres=True
                 )
+            else:
+                self.peg_transformed_mesh.points = transformed_point.reshape(1, 3)
+                self.peg_transformed_mesh.modified()
 
         self.plotter.render()
 
@@ -598,7 +605,19 @@ class MainWindow(QtWidgets.QWidget):
                     row_dict["affine_transform_ransac_errors"][i],
                 ]
                 point_rows.append(row)
-            
+
+            if "Camera" in row_dict and "Hololens" in row_dict:
+                try:
+                    camera_points = [np.array(p) for p in row_dict["Camera"]]
+                    hololens_points = [np.array(p) for p in row_dict["Hololens"]]
+                    if len(camera_points) == len(hololens_points):
+                        self.set_all_pairs(camera_points, hololens_points)
+                        print(f"[MainWindow] Loaded {len(camera_points)} Camera/Hololens point pairs from matrix file.")
+                    else:
+                        print("[MainWindow] Warning: 'Camera' and 'Hololens' arrays are unequal in length.")
+                except Exception as e:
+                    print(f"[MainWindow] Failed to parse Camera/Hololens point arrays: {e}")
+
             self.matrix_info_window = MatrixInfoWindow(self.transform_matrices, point_rows, rmse_values)
             self.matrix_info_window.show()
 
