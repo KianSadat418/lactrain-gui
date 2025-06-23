@@ -373,7 +373,6 @@ class MainWindow(QtWidgets.QWidget):
 
         self.latest_validation_gaze = None
         self.latest_validation_roi = 0.0
-        self.fixed_validation_roi = None
         self.latest_validation_intercept = 0
 
         self.validation_line_mesh = pv.PolyData()
@@ -492,47 +491,42 @@ class MainWindow(QtWidgets.QWidget):
 
     @QtCore.pyqtSlot(object, float, int)
     def update_validation_gaze(self, gaze_line, roi, intercept):
+        """Receive latest validation gaze data from the socket."""
 
         try:
-            self.latest_validation_gaze = np.array(gaze_line)
-            if self.fixed_validation_roi is None:
-                self.fixed_validation_roi = roi
-            self.latest_validation_intercept = intercept
-            color = "red" if intercept else "green"
+            # Store latest data for timer based update
+            gaze_arr = np.array(gaze_line)
+            if gaze_arr.shape != (2, 3):
+                print(f"[MainWindow] Invalid validation gaze shape: {gaze_arr.shape}")
+                return
+            self.latest_validation_gaze = gaze_arr
+            self.latest_validation_roi = float(roi)
+            self.latest_validation_intercept = int(intercept)
 
-            # Update gaze line in-place
-            self.latest_validation_gaze = np.array(gaze_line)
-            self.validation_line_mesh.lines = np.array([2, 0, 1])
-            self.validation_line_mesh.Modified()
-            self.plotter.update_scalars(None, render=False)
+            # Update line color immediately based on intercept
+            color = "red" if self.latest_validation_intercept else "green"
             self.validation_gaze_line_actor.GetProperty().SetColor(Color(color).float_rgb)
 
-            # Remove old disc if needed
-            if hasattr(self, "validation_roi_actor") and self.validation_roi_actor:
-                self.plotter.remove_actor(self.validation_roi_actor)
+            # Ensure line mesh has proper topology
+            self.validation_line_mesh.lines = np.array([2, 0, 1])
+            self.validation_line_mesh.Modified()
 
-            # ROI disc
-            A, B = gaze_line
-            direction = B - A
-            norm_direction = direction / np.linalg.norm(direction)
-            disc_center = A + 0.5 * direction
-            disc = pv.Disc(center=disc_center, inner=0, outer=roi, normal=norm_direction, r_res=1, c_res=100)
-            self.validation_roi_actor = self.plotter.add_mesh(disc, color="yellow", opacity=0.5)
-
+            # Trigger immediate render update
             self.plotter.render()
         except Exception as e:
             print(f"[MainWindow] Failed to update validation gaze visuals: {e}")
 
     def _update_validation_gaze_line(self):
-        DISC_RADIUS = 0.02 
-
         if self.latest_validation_gaze is None:
             return
 
         A, B = self.latest_validation_gaze
-        roi = self.fixed_validation_roi if self.fixed_validation_roi is not None else 0.0
+        roi = float(self.latest_validation_roi)
         direction = B - A
-        norm_direction = direction / np.linalg.norm(direction)
+        length = np.linalg.norm(direction)
+        if length == 0:
+            return
+        norm_direction = direction / length
 
         # === 1. Update Line Mesh ===
         self.validation_line_mesh.points = pv.pyvista_ndarray([A, B])
@@ -542,22 +536,20 @@ class MainWindow(QtWidgets.QWidget):
         # === 2. Disc at endpoint ===
         # Smooth update of disc (no flickering)
         if hasattr(self, "validation_disc_mesh"):
-            current_center = self.validation_disc_mesh.center
-            offset = B - current_center
-            self.validation_disc_mesh.points += offset
+            disc = pv.Disc(center=B, inner=0.0, outer=roi, normal=norm_direction)
+            self.validation_disc_mesh.deep_copy(disc)
             self.validation_disc_mesh.Modified()
         else:
-            self.validation_disc_mesh = pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction)
+            self.validation_disc_mesh = pv.Disc(center=B, inner=0.0, outer=roi, normal=norm_direction)
             self.validation_disc_actor = self.plotter.add_mesh(self.validation_disc_mesh, color="cyan", opacity=0.5)
 
         # === 3. Cone from A to B ===
-       # Smooth update of cone (no flickering)
+        # Smooth update of cone (no flickering)
         cone_height = float(np.linalg.norm(direction))
 
         if hasattr(self, "validation_cone_mesh"):
-            current_center = self.validation_cone_mesh.center
-            offset = A - current_center
-            self.validation_cone_mesh.points += offset
+            cone = pv.Cone(center=A, direction=norm_direction, height=cone_height, radius=roi)
+            self.validation_cone_mesh.deep_copy(cone)
             self.validation_cone_mesh.Modified()
         else:
             self.validation_cone_mesh = pv.Cone(center=A, direction=norm_direction, height=cone_height, radius=roi)
@@ -601,12 +593,11 @@ class MainWindow(QtWidgets.QWidget):
 
                 # Transparent ROI sphere at transformed peg
                 if hasattr(self, "validation_sphere_mesh"):
-                    current_center = self.validation_sphere_mesh.center
-                    offset = transformed - current_center
-                    self.validation_sphere_mesh.points += offset
+                    sphere = pv.Sphere(radius=roi, center=transformed)
+                    self.validation_sphere_mesh.deep_copy(sphere)
                     self.validation_sphere_mesh.Modified()
                 else:
-                    self.validation_sphere_mesh = pv.Sphere(radius=self.latest_validation_roi, center=transformed)
+                    self.validation_sphere_mesh = pv.Sphere(radius=roi, center=transformed)
                     self.validation_sphere_actor = self.plotter.add_mesh(
                         self.validation_sphere_mesh, color="green", opacity=0.2
                     )
