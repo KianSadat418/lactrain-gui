@@ -372,11 +372,12 @@ class MainWindow(QtWidgets.QWidget):
         self.rmse_label = QtWidgets.QLabel("RMSE: N/A")
 
         self.latest_validation_gaze = None
+        self.latest_validation_roi = 0.0
         self.fixed_validation_roi = None
         self.latest_validation_intercept = 0
 
         self.validation_line_mesh = pv.PolyData()
-        self.validation_gaze_line_actor = self.plotter.add_mesh(self.validation_line_mesh, color="green", line_width=3, render=False)
+        self.validation_gaze_line_actor = self.plotter.add_mesh(self.validation_line_mesh, color="red", line_width=3, render=False)
 
         self.validation_gaze_timer = QtCore.QTimer()
         self.validation_gaze_timer.timeout.connect(self._update_validation_gaze_line)
@@ -539,16 +540,28 @@ class MainWindow(QtWidgets.QWidget):
         self.validation_line_mesh.Modified()
 
         # === 2. Disc at endpoint ===
-        if hasattr(self, "validation_disc_actor"):
-            self.plotter.remove_actor(self.validation_disc_actor)
-        disc = pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction)
-        self.validation_disc_actor = self.plotter.add_mesh(disc, color="cyan", opacity=0.5)
+        # Smooth update of disc (no flickering)
+        if hasattr(self, "validation_disc_mesh"):
+            current_center = self.validation_disc_mesh.center
+            offset = B - current_center
+            self.validation_disc_mesh.points += offset
+            self.validation_disc_mesh.Modified()
+        else:
+            self.validation_disc_mesh = pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction)
+            self.validation_disc_actor = self.plotter.add_mesh(self.validation_disc_mesh, color="cyan", opacity=0.5)
 
         # === 3. Cone from A to B ===
-        if hasattr(self, "validation_cone_actor"):
-            self.plotter.remove_actor(self.validation_cone_actor)
-        cone = pv.Cone(center=A, direction=norm_direction, height=float(np.linalg.norm(direction)), radius=roi)
-        self.validation_cone_actor = self.plotter.add_mesh(cone, color="orange", opacity=0.3)
+       # Smooth update of cone (no flickering)
+        cone_height = float(np.linalg.norm(direction))
+
+        if hasattr(self, "validation_cone_mesh"):
+            current_center = self.validation_cone_mesh.center
+            offset = A - current_center
+            self.validation_cone_mesh.points += offset
+            self.validation_cone_mesh.Modified()
+        else:
+            self.validation_cone_mesh = pv.Cone(center=A, direction=norm_direction, height=cone_height, radius=roi)
+            self.validation_cone_actor = self.plotter.add_mesh(self.validation_cone_mesh, color="orange", opacity=0.3)
 
         # --- 4. Validation Peg (real and transformed) with ROI sphere ---
         if self.peg_validation_point is not None:
@@ -587,14 +600,16 @@ class MainWindow(QtWidgets.QWidget):
                     self.peg_transformed_mesh.Modified()
 
                 # Transparent ROI sphere at transformed peg
-                if not hasattr(self, "validation_sphere_mesh"):
+                if hasattr(self, "validation_sphere_mesh"):
+                    current_center = self.validation_sphere_mesh.center
+                    offset = transformed - current_center
+                    self.validation_sphere_mesh.points += offset
+                    self.validation_sphere_mesh.Modified()
+                else:
                     self.validation_sphere_mesh = pv.Sphere(radius=self.latest_validation_roi, center=transformed)
                     self.validation_sphere_actor = self.plotter.add_mesh(
                         self.validation_sphere_mesh, color="green", opacity=0.2
                     )
-                else:
-                    self.validation_sphere_mesh.center = transformed
-                    self.validation_sphere_mesh.Modified()
 
         self.plotter.render()
 
