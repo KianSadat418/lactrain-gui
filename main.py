@@ -18,6 +18,10 @@ MATRIX_BUTTON_LABELS = [
             "Affine Xform RANSAC"
         ]
 
+# Length of the gaze ray and radius of the disc at the end of the line
+GAZE_LINE_LENGTH = 500.0
+DISC_RADIUS = 20.0
+
 class DataReceiver(QtCore.QThread):
     updated_points = QtCore.pyqtSignal(list, list)
     peg_point_received = QtCore.pyqtSignal(np.ndarray)
@@ -220,38 +224,46 @@ class GazeTrackingWindow(QtWidgets.QWidget):
                 print(f"[Gaze] Invalid gaze line shape: {gaze_line.shape}")
                 return
 
-            A, B = gaze_line[0], gaze_line[1]
-            direction = B - A
-            norm_direction = direction / np.linalg.norm(direction)
+            origin = gaze_line[0]
+            direction = gaze_line[1]
+            length = np.linalg.norm(direction)
+            if length == 0:
+                target = origin
+                norm_direction = np.array([0.0, 0.0, 0.0])
+            else:
+                norm_direction = direction / length
+                target = origin + norm_direction * GAZE_LINE_LENGTH
+            A, B = origin, target
+            self.latest_gaze_line = [A, B]
 
             # Update or create gaze line
+            line_points = np.array([A, B])
             if hasattr(self, "line_mesh") and self.line_mesh is not None:
-                self.line_mesh.points = pv.pyvista_ndarray(gaze_line)
+                self.line_mesh.points = pv.pyvista_ndarray(line_points)
                 self.line_mesh.lines = np.array([2, 0, 1])
                 self.line_mesh.Modified()
             else:
                 self.line_mesh = pv.PolyData()
-                self.line_mesh.points = pv.pyvista_ndarray(gaze_line)
+                self.line_mesh.points = pv.pyvista_ndarray(line_points)
                 self.line_mesh.lines = np.array([2, 0, 1])
                 self.gaze_line_actor = self.plotter.add_mesh(self.line_mesh, color="green", line_width=3)
 
-            # Remove old disc/cone actors if they exist
-            if hasattr(self, "roi_actor") and self.roi_actor:
-                self.plotter.remove_actor(self.roi_actor)
-            if hasattr(self, "cone_actor") and self.cone_actor:
-                self.plotter.remove_actor(self.cone_actor)
+            # Create or update disc at end point and cone from origin
+            if hasattr(self, "disc_mesh"):
+                disc = pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction)
+                self.disc_mesh.deep_copy(disc)
+                self.disc_mesh.Modified()
+            else:
+                self.disc_mesh = pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction)
+                self.disc_actor = self.plotter.add_mesh(self.disc_mesh, color="yellow", opacity=0.5)
 
-            # ROI disc + cone
-            if "roi" in gaze_data and gaze_data["roi"] is not None:
-                roi_center, roi_radius = gaze_data["roi"]
-                roi_radius = float(roi_radius)
-                disc_center = A + 0.5 * direction
-                disc = pv.Disc(center=disc_center, inner=0, outer=roi_radius, normal=norm_direction, r_res=1, c_res=100)
-                self.roi_actor = self.plotter.add_mesh(disc, color="yellow", opacity=0.5)
-
-                cone_length = float(np.linalg.norm(disc_center - A))
-                cone = pv.Cone(center=A, direction=norm_direction, height=cone_length, radius=roi_radius)
-                self.cone_actor = self.plotter.add_mesh(cone, color="orange", opacity=0.3)
+            if hasattr(self, "cone_mesh"):
+                cone = pv.Cone(center=B, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS)
+                self.cone_mesh.deep_copy(cone)
+                self.cone_mesh.Modified()
+            else:
+                self.cone_mesh = pv.Cone(center=B, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS)
+                self.cone_actor = self.plotter.add_mesh(self.cone_mesh, color="orange", opacity=0.3)
 
             # Pegs
             if "pegs" in gaze_data:
@@ -314,6 +326,21 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         self.line_mesh.points = pv.pyvista_ndarray(points)
         self.line_mesh.lines = np.array([2, 0, 1])  # VTK line: n_points, i0, i1
         self.line_mesh.Modified()
+
+        # Update disc and cone based on latest orientation
+        origin, target = points
+        direction = target - origin
+        length = np.linalg.norm(direction)
+        if length > 0:
+            norm_direction = direction / length
+            if hasattr(self, "disc_mesh"):
+                disc = pv.Disc(center=target, inner=0.0, outer=DISC_RADIUS, normal=norm_direction)
+                self.disc_mesh.deep_copy(disc)
+                self.disc_mesh.Modified()
+            if hasattr(self, "cone_mesh"):
+                cone = pv.Cone(center=target, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS)
+                self.cone_mesh.deep_copy(cone)
+                self.cone_mesh.Modified()
         self.plotter.render()
 
 
@@ -499,7 +526,14 @@ class MainWindow(QtWidgets.QWidget):
             if gaze_arr.shape != (2, 3):
                 print(f"[MainWindow] Invalid validation gaze shape: {gaze_arr.shape}")
                 return
-            self.latest_validation_gaze = gaze_arr
+            origin = gaze_arr[0]
+            direction = gaze_arr[1]
+            length = np.linalg.norm(direction)
+            if length == 0:
+                target = origin
+            else:
+                target = origin + (direction / length) * GAZE_LINE_LENGTH
+            self.latest_validation_gaze = np.array([origin, target])
             self.latest_validation_roi = float(roi)
             self.latest_validation_intercept = int(intercept)
 
@@ -534,25 +568,21 @@ class MainWindow(QtWidgets.QWidget):
         self.validation_line_mesh.Modified()
 
         # === 2. Disc at endpoint ===
-        # Smooth update of disc (no flickering)
         if hasattr(self, "validation_disc_mesh"):
-            disc = pv.Disc(center=B, inner=0.0, outer=roi, normal=norm_direction)
+            disc = pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction)
             self.validation_disc_mesh.deep_copy(disc)
             self.validation_disc_mesh.Modified()
         else:
-            self.validation_disc_mesh = pv.Disc(center=B, inner=0.0, outer=roi, normal=norm_direction)
+            self.validation_disc_mesh = pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction)
             self.validation_disc_actor = self.plotter.add_mesh(self.validation_disc_mesh, color="cyan", opacity=0.5)
 
-        # === 3. Cone from A to B ===
-        # Smooth update of cone (no flickering)
-        cone_height = float(np.linalg.norm(direction))
-
+        # === 3. Cone from origin to disc ===
         if hasattr(self, "validation_cone_mesh"):
-            cone = pv.Cone(center=A, direction=norm_direction, height=cone_height, radius=roi)
+            cone = pv.Cone(center=B, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS)
             self.validation_cone_mesh.deep_copy(cone)
             self.validation_cone_mesh.Modified()
         else:
-            self.validation_cone_mesh = pv.Cone(center=A, direction=norm_direction, height=cone_height, radius=roi)
+            self.validation_cone_mesh = pv.Cone(center=B, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS)
             self.validation_cone_actor = self.plotter.add_mesh(self.validation_cone_mesh, color="orange", opacity=0.3)
 
         # --- 4. Validation Peg (real and transformed) with ROI sphere ---
