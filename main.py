@@ -598,7 +598,7 @@ class MainWindow(QtWidgets.QWidget):
                 ]
             self.transform_matrices = []
             for key in required_keys:
-                if key not in required_keys:
+                if key not in matrix_json:
                     raise ValueError(f"Missing required key: {key}")
                 matrix_data = matrix_json[key]
                 matrix = np.array(matrix_data).reshape(4, 4)
