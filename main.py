@@ -233,6 +233,7 @@ class GazeTrackingWindow(QtWidgets.QWidget):
             else:
                 norm_direction = direction / length
                 target = origin + norm_direction * GAZE_LINE_LENGTH
+
             A, B = origin, target
             self.latest_gaze_line = [A, B]
 
@@ -533,6 +534,7 @@ class MainWindow(QtWidgets.QWidget):
                 target = origin
             else:
                 target = origin + (direction / length) * GAZE_LINE_LENGTH
+
             self.latest_validation_gaze = np.array([origin, target])
             self.latest_validation_roi = float(roi)
             self.latest_validation_intercept = int(intercept)
