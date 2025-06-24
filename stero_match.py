@@ -3,6 +3,7 @@ import cv2
 from scipy.optimize import linear_sum_assignment
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+import time
 
 def triangulate_best_peg_matches(
     left_points, right_points, 
