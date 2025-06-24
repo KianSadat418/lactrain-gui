@@ -72,3 +72,33 @@ def triangulate_best_peg_matches(
     matched_points = [triangulated_candidates[i][j] for i, j in zip(row_ind, col_ind)]
 
     return matched_points
+
+def plot_3d_pegs(points_3d, title="Triangulated Pegs"):
+    """
+    Plots a list of 3D points using matplotlib.
+
+    Args:
+        points_3d: List of 3D (x, y, z) coordinates.
+        title: Title of the plot window.
+    """
+    points_3d = np.array(points_3d)
+
+    # Filter only finite points
+    valid_mask = np.all(np.isfinite(points_3d), axis=1)
+    valid_points = points_3d[valid_mask]
+
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    ax.scatter(valid_points[:, 0], valid_points[:, 1], valid_points[:, 2], c='b', s=60)
+
+    for i, (x, y, z) in enumerate(valid_points):
+        ax.text(x, y, z, f'{i}', fontsize=10, color='red')
+
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z")
+    ax.set_title(title)
+    ax.grid(True)
+    ax.view_init(elev=30, azim=45)
+    plt.tight_layout()
+    plt.show()
