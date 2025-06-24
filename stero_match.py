@@ -1,109 +1,74 @@
 import numpy as np
 import cv2
 from scipy.optimize import linear_sum_assignment
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-import time
 
 def triangulate_best_peg_matches(
     left_points, right_points, 
     K1, D1, R1, P1,
     K2, D2, R2, P2,
-    z_weight: float = 10.0
+    z_plane: float = 0.0
 ):
     def get_camera_origin(P):
         _, _, _, _, _, _, origin = cv2.decomposeProjectionMatrix(P)
         origin = origin.flatten()
         return origin[:3] / origin[3] if origin.shape[0] == 4 else origin[:3]
 
-    def ray_crossing_error(ray1, origin1, ray2, origin2):
-        cross = np.cross(ray1, ray2)
-        denom = np.linalg.norm(cross)
-        if denom < 1e-6:
-            return np.linalg.norm(np.cross(origin2 - origin1, ray1)) / np.linalg.norm(ray1)
-        return abs(np.dot(origin2 - origin1, cross)) / denom
-
-    def triangulate_point(pt1, pt2):
-        pt1 = np.array(pt1, dtype=np.float32).reshape(2, 1)
-        pt2 = np.array(pt2, dtype=np.float32).reshape(2, 1)
-        point_4d = cv2.triangulatePoints(P1, P2, pt1, pt2)
-        return (point_4d[:3] / point_4d[3]).flatten()
-
     def rectify_points(pts, K, D, R, P):
         pts = np.array(pts, dtype=np.float32).reshape(-1, 1, 2)
         rectified = cv2.undistortPoints(pts, K, D, R=R, P=P)
         return rectified.reshape(-1, 2)
 
-    # Rectify left and right peg coordinates
+    def image_point_to_ray(image_pt):
+        x, y = image_pt
+        ray = np.array([x, y, 1.0])
+        return ray / np.linalg.norm(ray)
+
+    def triangulate_point(ray1, origin1, ray2, origin2):
+        v1 = ray1
+        v2 = ray2
+        p1 = origin1
+        p2 = origin2
+        A = np.stack([v1, -v2], axis=1)
+        b = p2 - p1
+        t = np.linalg.lstsq(A, b, rcond=None)[0]
+        pt1 = p1 + t[0] * v1
+        pt2 = p2 + t[1] * v2
+        midpoint = (pt1 + pt2) / 2
+        return midpoint
+
+    def project_to_z_plane(ray, origin, z_plane):
+        t = (z_plane - origin[2]) / ray[2]
+        return origin + t * ray
+
+    def triangulation_error(ray1, origin1, ray2, origin2):
+        cross = np.cross(ray1, ray2)
+        denom = np.linalg.norm(cross)
+        separation = abs(np.dot(origin2 - origin1, cross)) / denom if denom > 1e-6 else 1e6
+        parallel_penalty = 1 / (denom + 1e-6)
+        return separation + 10 * parallel_penalty
+
+    # === Rectify points ===
     left_rect = rectify_points(left_points, K1, D1, R1, P1)
     right_rect = rectify_points(right_points, K2, D2, R2, P2)
 
     origin1 = get_camera_origin(P1)
     origin2 = get_camera_origin(P2)
 
-    triangulated_candidates = [[None for _ in range(6)] for _ in range(6)]
     cost_matrix = np.zeros((6, 6))
+    triangulated_candidates = [[None]*6 for _ in range(6)]
 
     for i in range(6):
-        lx, ly = left_rect[i]
+        ray1 = image_point_to_ray(left_rect[i])
         for j in range(6):
-            rx, ry = right_rect[j]
+            ray2 = image_point_to_ray(right_rect[j])
 
-            # Align Y (pseudo-rectification)
-            avg_y = (ly + ry) / 2
-            pt_left = [lx, avg_y]
-            pt_right = [rx, avg_y]
+            point_3d = triangulate_point(ray1, origin1, ray2, origin2)
+            # Force Z-plane constraint
+            point_3d_z0 = project_to_z_plane((point_3d - origin1), origin1, z_plane)
+            triangulated_candidates[i][j] = point_3d_z0
+            cost_matrix[i][j] = triangulation_error(ray1, origin1, ray2, origin2)
 
-            # Reject negative disparities (right should be to the left of left)
-            if lx - rx <= 0:
-                cost_matrix[i][j] = 1e6
-                continue
-
-            # Triangulate
-            point_3d = triangulate_point(pt_left, pt_right)
-            triangulated_candidates[i][j] = point_3d
-
-            # Ray direction (in normalized rectified space)
-            ray1 = np.array([lx, avg_y, 1.0])
-            ray2 = np.array([rx, avg_y, 1.0])
-            ray1 /= np.linalg.norm(ray1)
-            ray2 /= np.linalg.norm(ray2)
-
-            ray_error = ray_crossing_error(ray1, origin1, ray2, origin2)
-            z_penalty = abs(point_3d[2]) * z_weight  # Push Z values toward 0 plane
-            cost_matrix[i][j] = ray_error + z_penalty
-
-    # Normalize cost matrix
-    cost_matrix = (cost_matrix - np.min(cost_matrix)) / (np.max(cost_matrix) - np.min(cost_matrix) + 1e-8)
-
-    # Hungarian assignment for best match
     row_ind, col_ind = linear_sum_assignment(cost_matrix)
-    matched_3D_points = [triangulated_candidates[i][j] for i, j in zip(row_ind, col_ind)]
+    matched_points = [triangulated_candidates[i][j] for i, j in zip(row_ind, col_ind)]
 
-    return matched_3D_points
-
-def plot_3d_pegs(points_3d, title="Triangulated Pegs"):
-    """
-    Plots a list of 3D points using matplotlib.
-
-    Args:
-        points_3d: List of 3D (x, y, z) coordinates.
-        title: Title of the plot window.
-    """
-    points_3d = np.array(points_3d)
-
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')
-    ax.scatter(points_3d[:, 0], points_3d[:, 1], points_3d[:, 2], c='b', s=60)
-
-    for i, (x, y, z) in enumerate(points_3d):
-        ax.text(x, y, z, f'{i}', fontsize=10, color='red')
-
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")
-    ax.set_title(title)
-    ax.grid(True)
-    ax.view_init(elev=30, azim=45)
-    plt.tight_layout()
-    plt.show()
+    return matched_points
