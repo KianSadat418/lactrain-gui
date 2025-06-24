@@ -11,6 +11,14 @@ def triangulate_best_peg_matches(left_points, right_points, P1, P2):
         K, _ = cv2.decomposeProjectionMatrix(P)[:2]
         ray = np.linalg.inv(K) @ pt_h
         return ray / np.linalg.norm(ray)
+    
+    def get_camera_origin(P):
+        _, _, _, _, _, _, origin = cv2.decomposeProjectionMatrix(P)
+        origin = origin.flatten()
+        if origin.shape[0] == 4:
+            return origin[:3] / origin[3]
+        else:
+            return origin[:3]
 
     def triangulate_point(P1, P2, pt1, pt2):
         """Use OpenCV's triangulatePoints to get 3D point from 2D matches."""
@@ -31,10 +39,8 @@ def triangulate_best_peg_matches(left_points, right_points, P1, P2):
         return abs(np.dot((p2 - p1), cross)) / denom
 
     # Get camera origins from projection matrices
-    _, _, _, _, _, _, origin1 = cv2.decomposeProjectionMatrix(P1)
-    _, _, _, _, _, _, origin2 = cv2.decomposeProjectionMatrix(P2)
-    origin1 = origin1[:3].flatten() / origin1[3]
-    origin2 = origin2[:3].flatten() / origin2[3]
+    origin1 = get_camera_origin(P1)
+    origin2 = get_camera_origin(P2)
 
     # Build cost matrix and triangulated candidate array
     cost_matrix = np.zeros((6, 6))
