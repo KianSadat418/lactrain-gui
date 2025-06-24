@@ -60,8 +60,8 @@ def triangulate_best_peg_matches(
             triangulated_candidates[i][j] = point_3d
 
             # Step 4: compute rays and error
-            ray1 = np.array([pt_left[0], pt_left[1], 1.0])
-            ray2 = np.array([pt_right[0], pt_right[1], 1.0])
+            ray1 = np.array([lx, avg_y, 1.0])
+            ray2 = np.array([rx, avg_y, 1.0])
             ray1 /= np.linalg.norm(ray1)
             ray2 /= np.linalg.norm(ray2)
 
@@ -69,6 +69,8 @@ def triangulate_best_peg_matches(
             ray_error = ray_crossing_error(ray1, origin1, ray2, origin2)
             z_penalty = 0 if point_3d[2] > 0 else abs(point_3d[2]) * 5
             cost_matrix[i][j] = ray_error + z_penalty
+            
+    cost_matrix = (cost_matrix - np.min(cost_matrix)) / (np.max(cost_matrix) - np.min(cost_matrix) + 1e-8)
 
     # Step 6: Optimal matching
     row_ind, col_ind = linear_sum_assignment(cost_matrix)
