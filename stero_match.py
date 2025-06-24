@@ -3,18 +3,6 @@ import cv2
 from scipy.optimize import linear_sum_assignment
 
 def triangulate_best_peg_matches(left_points, right_points, P1, P2):
-    """
-    Given 6 2D points from left and right stereo images, returns the 6 triangulated 3D peg positions
-    matched using ray crossing error.
-    
-    Args:
-        left_points (list of (x, y)): List of 6 points from the left image.
-        right_points (list of (x, y)): List of 6 points from the right image.
-        P1, P2: Projection matrices for the left and right cameras.
-
-    Returns:
-        List of 6 (x, y, z) triangulated 3D points.
-    """
 
     def image_point_to_ray(image_pt, P):
         """Back-project 2D point into normalized camera space as a ray."""
