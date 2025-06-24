@@ -19,8 +19,8 @@ MATRIX_BUTTON_LABELS = [
         ]
 
 # Length of the gaze ray and radius of the disc at the end of the line
-GAZE_LINE_LENGTH = 500.0
-DISC_RADIUS = 20.0
+GAZE_LINE_LENGTH = 350.0
+DISC_RADIUS = 50.0
 
 class DataReceiver(QtCore.QThread):
     updated_points = QtCore.pyqtSignal(list, list)
@@ -153,7 +153,7 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         self.latest_gaze_line = None
         self.gaze_line_actor = None
         self.line_mesh = pv.PolyData()
-        self.line_actor = self.plotter.add_mesh(self.line_mesh, color="green", line_width=3, render=False)
+        self.line_actor = self.plotter.add_mesh(self.line_mesh, color="green", line_width=3, render=True)
 
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self._update_gaze_line_actor)
@@ -251,11 +251,11 @@ class GazeTrackingWindow(QtWidgets.QWidget):
 
             # Create or update disc at end point and cone from origin
             if hasattr(self, "disc_mesh"):
-                disc = pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction)
+                disc = pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction, r_res=1, c_res=10)
                 self.disc_mesh.deep_copy(disc)
                 self.disc_mesh.Modified()
             else:
-                self.disc_mesh = pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction)
+                self.disc_mesh = pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction, r_res=1, c_res=10)
                 self.disc_actor = self.plotter.add_mesh(self.disc_mesh, color="yellow", opacity=0.5)
 
             if hasattr(self, "cone_mesh"):
@@ -335,7 +335,7 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         if length > 0:
             norm_direction = direction / length
             if hasattr(self, "disc_mesh"):
-                disc = pv.Disc(center=target, inner=0.0, outer=DISC_RADIUS, normal=norm_direction)
+                disc = pv.Disc(center=target, inner=0.0, outer=DISC_RADIUS, normal=norm_direction, r_res=1, c_res=10)
                 self.disc_mesh.deep_copy(disc)
                 self.disc_mesh.Modified()
             if hasattr(self, "cone_mesh"):
@@ -408,11 +408,11 @@ class MainWindow(QtWidgets.QWidget):
         self.latest_validation_intercept = 0
 
         self.validation_line_mesh = pv.PolyData()
-        self.validation_gaze_line_actor = self.plotter.add_mesh(self.validation_line_mesh, color="red", line_width=3, render=False)
+        self.validation_gaze_line_actor = self.plotter.add_mesh(self.validation_line_mesh, color="red", line_width=3, render=True)
 
         self.validation_gaze_timer = QtCore.QTimer()
         self.validation_gaze_timer.timeout.connect(self._update_validation_gaze_line)
-        self.validation_gaze_timer.start(20)  # update every 50 ms
+        self.validation_gaze_timer.start(5)  # update every 50 ms
 
         # Right side configuration panel
         options_group = QtWidgets.QGroupBox("Options")
@@ -577,11 +577,11 @@ class MainWindow(QtWidgets.QWidget):
 
         # === 2. Disc at endpoint ===
         if hasattr(self, "validation_disc_mesh"):
-            disc = pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction)
+            disc = pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction, r_res=1, c_res=10)
             self.validation_disc_mesh.deep_copy(disc)
             self.validation_disc_mesh.Modified()
         else:
-            self.validation_disc_mesh = pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction)
+            self.validation_disc_mesh = pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction, r_res=1, c_res=10)
             self.validation_disc_actor = self.plotter.add_mesh(self.validation_disc_mesh, color="cyan", opacity=0.5)
 
         # === 3. Cone from origin to disc ===
