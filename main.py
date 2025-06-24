@@ -869,7 +869,7 @@ class MainWindow(QtWidgets.QWidget):
             origin_actor = self.plotter.add_points(
                 origin,
                 color="black",
-                point_size=16,
+                point_size=10,
                 render_points_as_spheres=True
             )
 
