@@ -11,7 +11,7 @@ def triangulate_best_peg_matches(
     def get_camera_origin(P):
         _, _, _, _, _, _, origin = cv2.decomposeProjectionMatrix(P)
         origin = origin.flatten()
-        return origin[:3] / origin[3]
+        return origin[:3] / origin[3] if origin.shape[0] == 4 else origin[:3]
 
     def ray_crossing_error(ray1, origin1, ray2, origin2):
         cross = np.cross(ray1, ray2)
