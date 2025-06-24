@@ -1,6 +1,7 @@
 import numpy as np
 import cv2
 from scipy.optimize import linear_sum_assignment
+from typing import Union
 
 def triangulate_best_peg_matches(
     left_points, right_points, 
@@ -37,6 +38,8 @@ def triangulate_best_peg_matches(
         return midpoint
 
     def project_to_z_plane(ray, origin, z_plane):
+        if not np.isfinite(ray[2]) or abs(ray[2]) < 1e-6:
+            return np.full(3, np.nan)  # Return [nan, nan, nan] if vertical component is zero
         t = (z_plane - origin[2]) / ray[2]
         return origin + t * ray
 
@@ -55,7 +58,7 @@ def triangulate_best_peg_matches(
     origin2 = get_camera_origin(P2)
 
     cost_matrix = np.zeros((6, 6))
-    triangulated_candidates = [[None]*6 for _ in range(6)]
+    triangulated_candidates: list[list[Union[np.ndarray, None]]] = [[None]*6 for _ in range(6)]
 
     for i in range(6):
         ray1 = image_point_to_ray(left_rect[i])
@@ -65,8 +68,13 @@ def triangulate_best_peg_matches(
             point_3d = triangulate_point(ray1, origin1, ray2, origin2)
             # Force Z-plane constraint
             point_3d_z0 = project_to_z_plane((point_3d - origin1), origin1, z_plane)
-            triangulated_candidates[i][j] = point_3d_z0
-            cost_matrix[i][j] = triangulation_error(ray1, origin1, ray2, origin2)
+
+            point_3d_z0 = project_to_z_plane((point_3d - origin1), origin1, z_plane)
+            if not np.all(np.isfinite(point_3d_z0)):
+                cost_matrix[i][j] = 1e6  # Penalize invalid solutions
+            else:
+                triangulated_candidates[i][j] = point_3d_z0
+                cost_matrix[i][j] = triangulation_error(ray1, origin1, ray2, origin2)
 
     row_ind, col_ind = linear_sum_assignment(cost_matrix)
     matched_points = [triangulated_candidates[i][j] for i, j in zip(row_ind, col_ind)]
