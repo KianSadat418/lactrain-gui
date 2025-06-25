@@ -19,7 +19,7 @@ MATRIX_BUTTON_LABELS = [
         ]
 
 # Length of the gaze ray and radius of the disc at the end of the line
-GAZE_LINE_LENGTH = 350.0
+GAZE_LINE_LENGTH = 500.0
 DISC_RADIUS = 50.0
 
 class DataReceiver(QtCore.QThread):
@@ -236,6 +236,7 @@ class GazeTrackingWindow(QtWidgets.QWidget):
 
             A, B = origin, target
             self.latest_gaze_line = [A, B]
+            cone_center = A + 0.5 * (B - A)
 
             # Update or create gaze line
             line_points = np.array([A, B])
@@ -259,11 +260,11 @@ class GazeTrackingWindow(QtWidgets.QWidget):
                 self.disc_actor = self.plotter.add_mesh(self.disc_mesh, color="yellow", opacity=0.5)
 
             if hasattr(self, "cone_mesh"):
-                cone = pv.Cone(center=B, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS)
+                cone = pv.Cone(center=cone_center, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS)
                 self.cone_mesh.deep_copy(cone)
                 self.cone_mesh.Modified()
             else:
-                self.cone_mesh = pv.Cone(center=B, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS)
+                self.cone_mesh = pv.Cone(center=cone_center, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS)
                 self.cone_actor = self.plotter.add_mesh(self.cone_mesh, color="orange", opacity=0.3)
 
             # Pegs
@@ -563,6 +564,7 @@ class MainWindow(QtWidgets.QWidget):
             return
 
         A, B = self.latest_validation_gaze
+        cone_center = A + 0.5 * (B - A)
         roi = float(self.latest_validation_roi)
         direction = B - A
         length = np.linalg.norm(direction)
@@ -586,11 +588,11 @@ class MainWindow(QtWidgets.QWidget):
 
         # === 3. Cone from origin to disc ===
         if hasattr(self, "validation_cone_mesh"):
-            cone = pv.Cone(center=B, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS)
+            cone = pv.Cone(center=cone_center, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS)
             self.validation_cone_mesh.deep_copy(cone)
             self.validation_cone_mesh.Modified()
         else:
-            self.validation_cone_mesh = pv.Cone(center=B, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS)
+            self.validation_cone_mesh = pv.Cone(center=cone_center, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS)
             self.validation_cone_actor = self.plotter.add_mesh(self.validation_cone_mesh, color="orange", opacity=0.3)
 
         # --- 4. Validation Peg (real and transformed) with ROI sphere ---
