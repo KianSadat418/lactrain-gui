@@ -114,8 +114,8 @@ class MatrixInfoWindow(QtWidgets.QWidget):
             "Camera", "HoloLens",
             "Sim Xform", "Sim Error",
             "Affine Xform", "Affine Error",
-            "Sim RANSAC", "Sim RANSAC Error",
-            "Affine RANSAC", "Affine RANSAC Error"
+            "Sim RANSAC", "Sim RANSAC Error", "Sim RANSAC Mask",
+            "Affine RANSAC", "Affine RANSAC Error", "Affine RANSAC Mask",
         ])
         table.setRowCount(len(point_rows))
         for i, row in enumerate(point_rows):
@@ -705,8 +705,10 @@ class MainWindow(QtWidgets.QWidget):
                     row_dict["affine_transform_errors"][i],
                     row_dict["similarity_transformed_ransac_B"][i],
                     row_dict["similarity_transform_ransac_errors"][i],
+                    row_dict["similarity_transform_ransac_mask"][i],
                     row_dict["affine_transformed_ransac_B"][i],
                     row_dict["affine_transform_ransac_errors"][i],
+                    row_dict["affine_transform_ransac_mask"][i]
                 ]
                 point_rows.append(row)
 
