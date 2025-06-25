@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from typing import Union
 import itertools
+from peg import Peg
 
 plt.ion()  # Enable interactive plotting
 fig = None
@@ -276,6 +277,30 @@ def res_without_rectify(right_frame, left_frame):
 
     return left_frame_peg, right_frame_peg
 
+# Assign triangulated positions to existing peg objects
+def assign_points_to_pegs(triangulated_points, pegs):
+    if any(p.position is None for p in pegs):
+        # Random init: assign sorted X-values if any peg is uninitialized
+        sorted_pts = sorted(triangulated_points, key=lambda p: p[0])
+        for peg, pos in zip(pegs, sorted_pts):
+            peg.update(np.array(pos))
+        return
+
+    cost_matrix = np.zeros((6, 6))
+    for i, peg in enumerate(pegs):
+        peg_pos = peg.get_position()
+        for j, new_pt in enumerate(triangulated_points):
+            cost_matrix[i][j] = np.linalg.norm(peg_pos - new_pt)
+
+    row_ind, col_ind = linear_sum_assignment(cost_matrix)
+    for i, j in zip(row_ind, col_ind):
+        if cost_matrix[i][j] < 50:  # Reject bad matches with large jumps
+            pegs[i].update(triangulated_points[j])
+        else:
+            pass  # Keep last known position
+
+pegs = [Peg(i) for i in range(6)]
+
 if __name__ == "__main__":
 
     while cap.isOpened():
@@ -349,7 +374,9 @@ if __name__ == "__main__":
             r_p = [p[1] for p in best_pair]
 
             pegs_3d = find_3D_points(l_p, r_p)
-            plot_3d_pegs_live(pegs_3d)
+            assign_points_to_pegs(pegs_3d, pegs)
+            peg_positions = [peg.get_position() for peg in pegs]
+            plot_3d_pegs_live(peg_positions)
 
 
         # result = triangulate_best_peg_matches(left_frame_peg, right_frame_peg, K1, D1, R1, P1, K2, D2, R2, P2)
@@ -363,5 +390,4 @@ if __name__ == "__main__":
         # # message = json.dumps(message)
         # # output_socket.sendto(message.encode('utf-8'), (OUTPUT_IP, OUTPUT_PORT))
         # # os.system('cls' if os.name == 'nt' else 'clear')
-        # # print(f"📤 Sent: {x:.2f}, {y:.2f}, {z:.2f}")
-        print("========================================")
+        # # print(f" Sent: {x:.2f}, {y:.2f}, {z:.2f}")
