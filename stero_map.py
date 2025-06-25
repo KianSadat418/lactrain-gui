@@ -376,6 +376,8 @@ if __name__ == "__main__":
             pegs_3d = find_3D_points(l_p, r_p)
             assign_points_to_pegs(pegs_3d, pegs)
             peg_positions = [peg.get_position() for peg in pegs]
+            for i, peg in enumerate(pegs):
+                print(f"Peg {i} position: {peg.get_position()}")
             plot_3d_pegs_live(peg_positions)
 
 
