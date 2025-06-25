@@ -279,7 +279,7 @@ def res_without_rectify(right_frame, left_frame):
 
 # Assign triangulated positions to existing peg objects
 def assign_points_to_pegs(triangulated_points, pegs):
-    if any(p.position is None for p in pegs):
+    if any(not p.initialized for p in pegs):
         # Random init: assign sorted X-values if any peg is uninitialized
         sorted_pts = sorted(triangulated_points, key=lambda p: p[0])
         for peg, pos in zip(pegs, sorted_pts):
