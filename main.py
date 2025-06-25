@@ -19,7 +19,7 @@ MATRIX_BUTTON_LABELS = [
         ]
 
 # Length of the gaze ray and radius of the disc at the end of the line
-GAZE_LINE_LENGTH = 500.0
+GAZE_LINE_LENGTH = 450.0
 DISC_RADIUS = 50.0
 
 class DataReceiver(QtCore.QThread):
@@ -101,7 +101,7 @@ class DataReceiver(QtCore.QThread):
 
 
 class MatrixInfoWindow(QtWidgets.QWidget):
-    def __init__(self, matrix_data, point_rows, rmse_values, parent=None):
+    def __init__(self, matrix_data, point_rows, rmse_values, repro_values, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Transformation Matrix Info")
         self.setMinimumWidth(1000)
@@ -109,13 +109,13 @@ class MatrixInfoWindow(QtWidgets.QWidget):
 
         # Table setup
         table = QtWidgets.QTableWidget()
-        table.setColumnCount(10)
+        table.setColumnCount(12)
         table.setHorizontalHeaderLabels([
             "Camera", "HoloLens",
             "Sim Xform", "Sim Error",
             "Affine Xform", "Affine Error",
             "Sim RANSAC", "Sim RANSAC Error", "Sim RANSAC Mask",
-            "Affine RANSAC", "Affine RANSAC Error", "Affine RANSAC Mask",
+            "Affine RANSAC", "Affine RANSAC Error", "Affine RANSAC Mask"
         ])
         table.setRowCount(len(point_rows))
         for i, row in enumerate(point_rows):
@@ -129,15 +129,16 @@ class MatrixInfoWindow(QtWidgets.QWidget):
 
         # Matrices and RMSE
         matrix_layout = QtWidgets.QFormLayout()
-        for name, mat, rmse in zip(
+        for name, mat, rmse, repro in zip(
             ["Similarity", "Affine", "Similarity RANSAC", "Affine RANSAC"],
             matrix_data,
-            rmse_values
+            rmse_values,
+            repro_values
         ):
             mat_str = "\n".join("  ".join(f"{v:.4f}" for v in row) for row in mat)
             matrix_label = QtWidgets.QLabel(f"<pre>{mat_str}</pre>")
             matrix_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-            matrix_layout.addRow(f"{name} Matrix (RMSE: {rmse:.4f})", matrix_label)
+            matrix_layout.addRow(f"{name} Matrix (RMSE: {rmse:.4f}, Repro Error: {repro:.4f})", matrix_label)
 
         layout.addLayout(matrix_layout)
         self.setLayout(layout)
@@ -154,9 +155,6 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         self.gaze_line_actor = None
         self.line_mesh = pv.PolyData()
         self.line_actor = self.plotter.add_mesh(self.line_mesh, color="green", line_width=3, render=True)
-
-        self.timer = QtCore.QTimer()
-        self.timer.timeout.connect(self._update_gaze_line_actor)
 
         self.current_gaze_data = None
         self.gaze_history = []
@@ -410,10 +408,6 @@ class MainWindow(QtWidgets.QWidget):
 
         self.validation_line_mesh = pv.PolyData()
         self.validation_gaze_line_actor = self.plotter.add_mesh(self.validation_line_mesh, color="red", line_width=3, render=True)
-
-        self.validation_gaze_timer = QtCore.QTimer()
-        self.validation_gaze_timer.timeout.connect(self._update_validation_gaze_line)
-        self.validation_gaze_timer.start(5)  # update every 50 ms
 
         # Right side configuration panel
         options_group = QtWidgets.QGroupBox("Options")
@@ -691,6 +685,7 @@ class MainWindow(QtWidgets.QWidget):
                 self.transform_matrices.append(matrix)
 
             rmse_values = matrix_json.get("rmse", [0, 0, 0, 0])
+            repro_values = matrix_json.get("repro", [0, 0, 0, 0])
             row_dict = matrix_json.get("rows", {})
             num_rows = len(row_dict.get("Camera", []))
             print(f"[MainWindow] Number of rows in data: {len(row_dict)}")
@@ -724,7 +719,7 @@ class MainWindow(QtWidgets.QWidget):
                 except Exception as e:
                     print(f"[MainWindow] Failed to parse Camera/Hololens point arrays: {e}")
 
-            self.matrix_info_window = MatrixInfoWindow(self.transform_matrices, point_rows, rmse_values)
+            self.matrix_info_window = MatrixInfoWindow(self.transform_matrices, point_rows, rmse_values, repro_values)
             self.matrix_info_window.show()
 
             print("[MainWindow] Transform matrices loaded successfully.")
