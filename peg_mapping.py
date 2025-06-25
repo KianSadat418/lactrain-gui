@@ -11,10 +11,6 @@ from mpl_toolkits.mplot3d import Axes3D
 from typing import Union
 import itertools
 
-plt.ion()  # Enable interactive plotting
-fig = None
-ax = None
-scatter = None
 
 model = YOLO("Assets/Scripts/Peg-Detection-Scripts/Training-05-22/result/content/runs/detect/yolo8_peg_detector/weights/best.pt")
 calib = np.load("Assets/Scripts/Camera Calibration/stereo_camera_calibration2.npz")
@@ -28,9 +24,6 @@ baseline_offset = T[0][0] / 2.0  # Half the translation between cameras (baselin
 image_size = (800, 600)
 
 R1, R2, P1, P2, Q, _, _ = cv2.stereoRectify(K1, D1, K2, D2, image_size, R, T, alpha=0, flags=cv2.CALIB_ZERO_DISPARITY)
-
-map1x, map1y = cv2.initUndistortRectifyMap(K1, D1, R1, P1, image_size, cv2.CV_32FC1)
-map2x, map2y = cv2.initUndistortRectifyMap(K2, D2, R2, P2, image_size, cv2.CV_32FC1)
 
 OUTPUT_PORT = 9991
 OUTPUT_IP = "127.0.0.1"
@@ -149,51 +142,6 @@ def plot_3d_pegs(points_3d, title="Triangulated Pegs"):
     plt.tight_layout()
     plt.show()
 
-def init_3d_plot():
-    """Initialize the 3D plot for live peg visualization."""
-    global fig, ax, scatter
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')
-    ax.set_title("Real-Time Triangulated Pegs")
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")
-    ax.grid(True)
-    scatter = ax.scatter([], [], [], c='b', s=60)
-    plt.tight_layout()
-    plt.show(block=False)
-
-def plot_3d_pegs_live(points_3d):
-    """Update the 3D scatter plot with new peg positions."""
-    global fig, ax, scatter
-    if fig is None or ax is None or scatter is None:
-        init_3d_plot()
-
-    points_3d = np.array(points_3d)
-    valid_mask = np.all(np.isfinite(points_3d), axis=1)
-    valid_points = points_3d[valid_mask]
-
-    if valid_points.shape[0] == 0:
-        return
-
-    ax.clear()
-    ax.set_title("Real-Time Triangulated Pegs")
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")
-    ax.grid(True)
-    ax.scatter(valid_points[:, 0], valid_points[:, 1], valid_points[:, 2], c='b', s=60)
-
-    for i, (x, y, z) in enumerate(valid_points):
-        ax.text(x, y, z, f'{i}', fontsize=10, color='red')
-
-    ax.set_xlim((-100, 100))  # Adjust as needed
-    ax.set_ylim((-100, 100))
-    ax.set_zlim((0, 200))
-
-    plt.draw()
-    plt.pause(0.01)
-
 def find_pairs(left_points, right_points):
 
     all_pairings = [list(zip(left_points, perm)) for perm in itertools.permutations(right_points)]
@@ -286,6 +234,9 @@ if __name__ == "__main__":
         left_frame = frame[:, :800]
         right_frame = frame[:, 800:]
 
+        map1x, map1y = cv2.initUndistortRectifyMap(K1, D1, R1, P1, image_size, cv2.CV_32FC1)
+        map2x, map2y = cv2.initUndistortRectifyMap(K2, D2, R2, P2, image_size, cv2.CV_32FC1)
+
         left_frame = cv2.remap(left_frame, map1x, map1y, cv2.INTER_LINEAR)
         right_frame = cv2.remap(right_frame, map2x, map2y, cv2.INTER_LINEAR)
 
@@ -328,13 +279,13 @@ if __name__ == "__main__":
         #print(f"Left Frame Pegs: {left_frame_peg}")
         #print(f"Right Frame Pegs: {right_frame_peg}")
 
-        if left_frame_peg is None or right_frame_peg is None:
-            continue
-
         if len(left_frame_peg) != 6 or len(right_frame_peg) != 6:
             continue
 
         #print(cv2.decomposeProjectionMatrix(P1).shape)
+
+        if left_frame_peg is None or right_frame_peg is None:
+            continue
 
         # pegsInCamera = find_3D_points(left_frame_peg, right_frame_peg)
         # if not pegsInCamera:
@@ -342,15 +293,19 @@ if __name__ == "__main__":
         
         # print(f"Pegs in Camera Coordinates: {pegsInCamera}")
 
+        result = []
         pairs = find_pairs(left_frame_peg, right_frame_peg)
-        if pairs:
-            best_pair = pairs[0]  # Assuming first valid pair is best
-            l_p = [p[0] for p in best_pair]
-            r_p = [p[1] for p in best_pair]
+        print(f"Pairs: {len(pairs)}")
+        for i in pairs:
+            l_p = []
+            r_p = []
+            for j in i:
+                l_p.append(j[0])
+                r_p.append(j[1])
 
-            pegs_3d = find_3D_points(l_p, r_p)
-            plot_3d_pegs_live(pegs_3d)
-
+            result.append(find_3D_points(l_p, r_p))
+        
+        break
 
         # result = triangulate_best_peg_matches(left_frame_peg, right_frame_peg, K1, D1, R1, P1, K2, D2, R2, P2)
         # break
@@ -364,4 +319,9 @@ if __name__ == "__main__":
         # # output_socket.sendto(message.encode('utf-8'), (OUTPUT_IP, OUTPUT_PORT))
         # # os.system('cls' if os.name == 'nt' else 'clear')
         # # print(f"📤 Sent: {x:.2f}, {y:.2f}, {z:.2f}")
+    
+    for i in result:
+        for j in i:
+            print(j)
+        plot_3d_pegs(i, title="Triangulated Pegs from Best Matches")
         print("========================================")
