@@ -214,6 +214,14 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         self.plotter.show_axes()
         self.plotter.show_grid()
 
+        self.plotter.enable_point_picking(
+            callback=self._on_point_picked,
+            use_picker=True,
+            show_message=False,
+            left_clicking=True,
+            show_point=True
+        )
+
     def update_gaze_visual(self, gaze_data: dict):
         try:
             self.current_gaze_data = gaze_data
@@ -349,6 +357,12 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         self.plotter.reset_camera()
         self.plotter.render()
 
+    def _on_point_picked(self, picked_point, picker):
+        if picked_point is not None:
+            coord_str = f"Picked Point: ({picked_point[0]:.2f}, {picked_point[1]:.2f}, {picked_point[2]:.2f})"
+            QtWidgets.QMessageBox.information(self, "Point Coordinates", coord_str)
+            print(coord_str)
+
     def zoom_in(self):
         self._zoom(1.2)
 
@@ -390,6 +404,15 @@ class MainWindow(QtWidgets.QWidget):
         self.plotter = QtInteractor(self)
         self.plotter.show_axes()
         self.plotter.show_grid()
+
+        self.plotter.enable_point_picking(
+            callback=self._on_point_picked,
+            use_picker=True,
+            show_message=False,
+            left_clicking=True,
+            show_point=True
+        )
+
         self.cam_checkbox = QtWidgets.QCheckBox("Show Camera Points")
         self.cam_checkbox.setChecked(True)
         self.holo_checkbox = QtWidgets.QCheckBox("Show HoloLens Points")
@@ -659,6 +682,12 @@ class MainWindow(QtWidgets.QWidget):
         self.plotter.reset_camera()
         self.plotter.render()
 
+    def _on_point_picked(self, picked_point, picker):
+        if picked_point is not None:
+            coord_str = f"Picked Point: ({picked_point[0]:.2f}, {picked_point[1]:.2f}, {picked_point[2]:.2f})"
+            QtWidgets.QMessageBox.information(self, "Point Coordinates", coord_str)
+            print(coord_str)
+
     def zoom_in(self):
         """Zoom the view in."""
         self._zoom(1.2)
@@ -804,6 +833,7 @@ class MainWindow(QtWidgets.QWidget):
                 point_size=12,
                 opacity=1.0 if self.cam_checkbox.isChecked() else 0.0,
                 render_points_as_spheres=True,
+                pickable=True
             )
 
         if self.holo_points:
@@ -813,6 +843,7 @@ class MainWindow(QtWidgets.QWidget):
                 point_size=12,
                 opacity=1.0 if self.holo_checkbox.isChecked() else 0.0,
                 render_points_as_spheres=True,
+                pickable=True
             )
 
         if self.transform_checkbox.isChecked():
@@ -822,6 +853,7 @@ class MainWindow(QtWidgets.QWidget):
                     color="green",  # transformed camera points
                     point_size=12,
                     render_points_as_spheres=True,
+                    pickable=True
                 )
             if self.manual_points:
                 self.plotter.add_points(
@@ -829,6 +861,7 @@ class MainWindow(QtWidgets.QWidget):
                     color="#CBCB00",  # manual point
                     point_size=12,
                     render_points_as_spheres=True,
+                    pickable=True
                 )
             if self.manual_transformed_points:
                 self.plotter.add_points(
@@ -836,6 +869,7 @@ class MainWindow(QtWidgets.QWidget):
                     color="#C48300",  # dark yellow for manual transform
                     point_size=12,
                     render_points_as_spheres=True,
+                    pickable=True
                 )
 
         if (
