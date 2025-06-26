@@ -83,6 +83,11 @@ class DataReceiver(QtCore.QThread):
                         roi_radius = float(data.get("roi", 0.0))
                         intercept = int(data.get("intercept", 0))
                         gaze_distance = float(data.get("gaze_distance", 0.0))
+                        pegs = np.array(data.get("pegs", []))
+
+                        parent = self.parent()
+                        if hasattr(parent, "gaze_window") and parent.gaze_window:
+                            parent.gaze_window.latest_pegs = pegs
 
                         # Emit to gaze window
                         QtCore.QMetaObject.invokeMethod(
@@ -90,7 +95,7 @@ class DataReceiver(QtCore.QThread):
                             QtCore.Q_ARG(object, gaze_line),
                             QtCore.Q_ARG(float, roi_radius),
                             QtCore.Q_ARG(int, intercept),
-                            QtCore.Q_ARG(float, gaze_distance)
+                            QtCore.Q_ARG(float, gaze_distance),
                         )
                     except Exception as e:
                         print(f"[Receiver] Error parsing G message: {e}")
