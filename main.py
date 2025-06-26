@@ -170,6 +170,10 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         self.latest_intercept = 0
         self.latest_pegs = []
         self.latest_gaze_distance = 0.0
+        self.fix_view_actors = []
+
+        # === Plotter ===
+        self.plotter = QtInteractor(self)
 
         # Original Peg Mesh (all 6)
         self.peg_mesh = pv.PolyData(np.zeros((6, 3)))
@@ -178,9 +182,6 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         # Transformed Peg Mesh (all 6)
         self.transformed_peg_mesh = pv.PolyData(np.zeros((6, 3)))
         self.transformed_peg_actor = self.plotter.add_mesh(self.transformed_peg_mesh, color="#300053", point_size=12, render_points_as_spheres=True)
-
-        # === Plotter ===
-        self.plotter = QtInteractor(self)
 
         # === Dashed Lines ===
         self.dashed_segments = 10
@@ -198,15 +199,19 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         self.reset_button = QtWidgets.QPushButton("Reset View")
         self.zoom_in_button = QtWidgets.QPushButton("+")
         self.zoom_out_button = QtWidgets.QPushButton("-")
+        self.fix_view_checkbox = QtWidgets.QCheckBox("Fix View")
+        self.fix_view_checkbox.setChecked(False)
 
         self.reset_button.clicked.connect(self.reset_view)
         self.zoom_in_button.clicked.connect(self.zoom_in)
         self.zoom_out_button.clicked.connect(self.zoom_out)
+        self.fix_view_checkbox.stateChanged.connect(self._update_fix_view_bounds)
 
         view_layout = QtWidgets.QVBoxLayout()
         view_layout.addWidget(self.reset_button)
         view_layout.addWidget(self.zoom_in_button)
         view_layout.addWidget(self.zoom_out_button)
+        view_layout.addWidget(self.fix_view_checkbox)
         view_layout.addStretch()
         view_group = QtWidgets.QGroupBox("View")
         view_group.setLayout(view_layout)
@@ -436,6 +441,37 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         camera = self.plotter.camera
         if hasattr(camera, "Zoom"):
             camera.Zoom(factor)
+        self.plotter.render()
+
+    def _update_fix_view_bounds(self):
+        # Remove previous fix view actors if any
+        if hasattr(self, "fix_view_actors"):
+            for actor in self.fix_view_actors:
+                self.plotter.remove_actor(actor)
+        self.fix_view_actors = []
+
+        # If checkbox is checked, add invisible bounds and origin
+        if self.fix_view_checkbox.isChecked():
+            invisible_bounds = np.array([[-100, -100, -100], [600, 600, 600]], dtype=np.float32)
+            origin = np.array([[0, 0, 0]], dtype=np.float32)
+
+            bounds_actor = self.plotter.add_points(
+                invisible_bounds,
+                color="white",
+                opacity=0.0,
+                point_size=1,
+                render_points_as_spheres=True
+            )
+            origin_actor = self.plotter.add_points(
+                origin,
+                color="black",
+                point_size=10,
+                render_points_as_spheres=True
+            )
+
+            self.fix_view_actors.extend([bounds_actor, origin_actor])
+
+        # Trigger re-render
         self.plotter.render()
 
     def refresh_transform_and_redraw(self):
