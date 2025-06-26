@@ -19,7 +19,7 @@ MATRIX_BUTTON_LABELS = [
         ]
 
 # Length of the gaze ray and radius of the disc at the end of the line
-GAZE_LINE_LENGTH = 450.0
+GAZE_LINE_LENGTH = 500.0
 DISC_RADIUS = 40.0
 
 class DataReceiver(QtCore.QThread):
@@ -413,6 +413,11 @@ class MainWindow(QtWidgets.QWidget):
             show_point=True
         )
 
+        self.render_timer = QtCore.QTimer()
+        self.render_timer.setInterval(100)  # Adjust to ~10 FPS (100 ms)
+        self.render_timer.timeout.connect(self.plotter.render)
+        self.render_timer.start()
+
         # Dashed line setup (20 segments = 10 dashes)
         self.dashed_segments = 10
         self.validation_dashed_meshes = []
@@ -435,7 +440,6 @@ class MainWindow(QtWidgets.QWidget):
         self.fix_view_checkbox.setChecked(False)
         self.zoom_out_button = QtWidgets.QPushButton("-")
 
-        self.rmse_label = QtWidgets.QLabel("RMSE: N/A")
         self.gaze_distance_label = QtWidgets.QLabel("Gaze Distance: N/A")
 
         self.latest_validation_gaze = None
@@ -510,7 +514,6 @@ class MainWindow(QtWidgets.QWidget):
         gaze_layout.addWidget(self.launch_gaze_button)
         gaze_group.setLayout(gaze_layout)
         right_layout.addWidget(gaze_group)
-        right_layout.addWidget(self.rmse_label)
         right_layout.addWidget(self.gaze_distance_label)
 
         layout = QtWidgets.QHBoxLayout(self)
@@ -543,7 +546,6 @@ class MainWindow(QtWidgets.QWidget):
     def set_all_pairs(self, camera_points, holo_points):
         self.camera_points = camera_points
         self.holo_points = holo_points
-        self.update_rmse()
         self.update_scene()
 
     @QtCore.pyqtSlot(np.ndarray)
@@ -577,7 +579,6 @@ class MainWindow(QtWidgets.QWidget):
             self.gaze_distance_label.setText(f"Gaze Distance: {gaze_distance:.2f} mm")
 
             self._update_validation_gaze_line()
-            self.plotter.render()
         except Exception as e:
             print(f"[MainWindow] Failed to update validation gaze visuals: {e}")
 
@@ -707,22 +708,10 @@ class MainWindow(QtWidgets.QWidget):
                     self.validation_dashed_meshes[i // 2].points = np.array([[0, 0, 0], [0, 0, 0]])
                     self.validation_dashed_meshes[i // 2].Modified()
 
-        self.plotter.render()
-
     @QtCore.pyqtSlot(dict)
     def receive_gaze_data(self, gaze_data: dict):
         if hasattr(self, "gaze_window") and self.gaze_window:
             self.gaze_window.update_gaze_visual(gaze_data)
-
-    def update_rmse(self):
-        if not self.camera_points:
-            self.rmse_label.setText("RMSE: N/A")
-            return
-        cams = np.vstack(self.camera_points)
-        holos = np.vstack(self.holo_points)
-        diff = cams - holos
-        rmse = np.sqrt(np.mean(np.sum(diff * diff, axis=1)))
-        self.rmse_label.setText(f"RMSE: {rmse:.4f}")
 
     def reset_view(self):
         """Reset camera orientation with Z axis pointing up."""
