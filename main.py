@@ -85,10 +85,6 @@ class DataReceiver(QtCore.QThread):
                         gaze_distance = float(data.get("gaze_distance", 0.0))
                         pegs = np.array(data.get("pegs", []))
 
-                        parent = self.parent()
-                        if hasattr(parent, "gaze_window") and parent.gaze_window:
-                            parent.gaze_window.latest_pegs = pegs
-
                         # Emit to gaze window
                         QtCore.QMetaObject.invokeMethod(
                             self.parent(), "receive_gaze_data", QtCore.Qt.QueuedConnection,
@@ -96,6 +92,7 @@ class DataReceiver(QtCore.QThread):
                             QtCore.Q_ARG(float, roi_radius),
                             QtCore.Q_ARG(int, intercept),
                             QtCore.Q_ARG(float, gaze_distance),
+                            QtCore.Q_ARG(object, pegs)
                         )
                     except Exception as e:
                         print(f"[Receiver] Error parsing G message: {e}")
@@ -280,8 +277,8 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         self.render_timer.start()
 
 
-    @QtCore.pyqtSlot(object, float, int, float)
-    def update_gaze_data(self, gaze_line, roi, intercept, gaze_distance):
+    @QtCore.pyqtSlot(object, float, int, float, object)
+    def update_gaze_data(self, gaze_line, roi, intercept, gaze_distance, pegs):
         try:
             gaze_arr = np.array(gaze_line)
             if gaze_arr.shape != (2, 3):
@@ -310,6 +307,7 @@ class GazeTrackingWindow(QtWidgets.QWidget):
             self.latest_roi = roi
             self.latest_intercept = intercept
             self.latest_gaze_distance = gaze_distance
+            self.latest_pegs = np.array(pegs)
 
             self.gaze_distance_label.setText(f"Gaze Distance: {gaze_distance:.2f} mm")
             self._update_gaze_line()
@@ -786,11 +784,10 @@ class MainWindow(QtWidgets.QWidget):
                     self.validation_dashed_meshes[i // 2].points = np.array([[0, 0, 0], [0, 0, 0]])
                     self.validation_dashed_meshes[i // 2].Modified()
 
-    @QtCore.pyqtSlot(object, float, int, float)
-    def receive_gaze_data(self, gaze_line, roi, intercept, gaze_distance):
-        # Forward to gaze window if exists
+    @QtCore.pyqtSlot(object, float, int, float, object)
+    def update_gaze_data(self, gaze_line, roi, intercept, gaze_distance, pegs):
         if hasattr(self, "gaze_window") and self.gaze_window:
-            self.gaze_window.update_gaze_data(gaze_line, roi, intercept, gaze_distance)
+            self.gaze_window.update_gaze_data(gaze_line, roi, intercept, gaze_distance, pegs)
 
     def reset_view(self):
         """Reset camera orientation with Z axis pointing up."""
