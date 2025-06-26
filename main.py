@@ -78,13 +78,22 @@ class DataReceiver(QtCore.QThread):
                         print(f"[Receiver] Error parsing or handling V message: {e}")
                 elif line.startswith("G"):
                     try:
-                        gaze_data = json.loads(line[1:])
+                        data = json.loads(line[1:])
+                        gaze_line = np.array(data.get("gaze_line"))
+                        roi_radius = float(data.get("roi", 0.0))
+                        intercept = int(data.get("intercept", 0))
+                        gaze_distance = float(data.get("gaze_distance", 0.0))
+
+                        # Emit to gaze window
                         QtCore.QMetaObject.invokeMethod(
-                            self.parent(), "receive_gaze_data", QtCore.Qt.QueuedConnection,
-                            QtCore.Q_ARG(dict, gaze_data)
+                            self.parent(), "update_gaze_data", QtCore.Qt.QueuedConnection,
+                            QtCore.Q_ARG(object, gaze_line),
+                            QtCore.Q_ARG(float, roi_radius),
+                            QtCore.Q_ARG(int, intercept),
+                            QtCore.Q_ARG(float, gaze_distance)
                         )
                     except Exception as e:
-                        print(f"[Receiver] Error parsing gaze data: {e}")
+                        print(f"[Receiver] Error parsing G message: {e}")
                 else:
                     data = json.loads(line)
                     camera_points = []
@@ -152,22 +161,28 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         self.setWindowTitle("Gaze Tracking")
         self.setMinimumSize(600, 400)
 
-        # === Plotter Setup ===
-        self.plotter = QtInteractor(self)
-        self.latest_gaze_line = None
-        self.gaze_line_actor = None
-        self.line_mesh = pv.PolyData()
-        self.line_actor = self.plotter.add_mesh(self.line_mesh, color="green", line_width=3, render=True)
-
-        self.current_gaze_data = None
-        self.gaze_history = []
-        self.max_history = 50
-        self.selected_matrix_index = 0
+        # === Core Attributes ===
         self.transform_matrices = transform_matrices or []
+        self.latest_gaze_line = None
+        self.latest_roi = 0.0
+        self.latest_intercept = 0
+        self.latest_pegs = []
+        self.latest_gaze_distance = 0.0
 
-        # === Left Panel: Viewer ===
-        viewer_layout = QtWidgets.QVBoxLayout()
-        viewer_layout.addWidget(self.plotter.interactor)
+        # === Plotter ===
+        self.plotter = QtInteractor(self)
+
+        # === Dashed Lines ===
+        self.dashed_segments = 10
+        self.dashed_meshes = []
+        self.dashed_actors = []
+        for _ in range(self.dashed_segments):
+            mesh = pv.PolyData()
+            mesh.points = pv.pyvista_ndarray([[0, 0, 0], [0, 0, 0]])
+            mesh.lines = np.array([2, 0, 1])
+            actor = self.plotter.add_mesh(mesh, color="red", line_width=2)
+            self.dashed_meshes.append(mesh)
+            self.dashed_actors.append(actor)
 
         # === View Controls ===
         self.reset_button = QtWidgets.QPushButton("Reset View")
@@ -183,11 +198,10 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         view_layout.addWidget(self.zoom_in_button)
         view_layout.addWidget(self.zoom_out_button)
         view_layout.addStretch()
-
         view_group = QtWidgets.QGroupBox("View")
         view_group.setLayout(view_layout)
 
-        # === Transform Controls ===
+        # === Matrix Transform Radio Buttons ===
         transform_layout = QtWidgets.QVBoxLayout()
         self.matrix_group = QtWidgets.QButtonGroup()
         self.matrix_buttons = []
@@ -199,10 +213,28 @@ class GazeTrackingWindow(QtWidgets.QWidget):
             transform_layout.addWidget(btn)
 
         self.matrix_buttons[0].setChecked(True)
-        self.matrix_group.buttonClicked.connect(self.refresh_transform_and_redraw)
+        self.matrix_group.buttonClicked.connect(self._update_gaze_line)
 
         transform_group = QtWidgets.QGroupBox("Transform")
         transform_group.setLayout(transform_layout)
+
+        # === Peg of Interest Selection ===
+        self.peg_of_interest_index = 0
+        self.peg_selector_group = QtWidgets.QGroupBox("Peg of Interest")
+        peg_radio_layout = QtWidgets.QVBoxLayout()
+        self.peg_radio_buttons = []
+        self.peg_button_group = QtWidgets.QButtonGroup()
+
+        for i in range(6):
+            btn = QtWidgets.QRadioButton(f"Peg {i}")
+            self.peg_button_group.addButton(btn, i)
+            self.peg_radio_buttons.append(btn)
+            peg_radio_layout.addWidget(btn)
+
+        self.peg_radio_buttons[0].setChecked(True)
+        self.peg_button_group.buttonClicked[int].connect(self.set_peg_of_interest)
+
+        self.peg_selector_group.setLayout(peg_radio_layout)
 
         # === Gaze Distance Label ===
         self.gaze_distance_label = QtWidgets.QLabel("Gaze Distance: N/A")
@@ -210,29 +242,21 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         # === Right Panel ===
         right_panel = QtWidgets.QVBoxLayout()
         right_panel.addWidget(transform_group)
+        right_panel.addWidget(self.peg_selector_group)
         right_panel.addWidget(view_group)
         right_panel.addWidget(self.gaze_distance_label)
         right_panel.addStretch()
 
-        # === Dashed Line Setup ===
-        self.dashed_segments = 10
-        self.dashed_meshes = []
-        self.dashed_actors = []
-        for _ in range(self.dashed_segments):
-            mesh = pv.PolyData()
-            mesh.points = pv.pyvista_ndarray([[0, 0, 0], [0, 0, 0]])
-            mesh.lines = np.array([2, 0, 1])
-            actor = self.plotter.add_mesh(mesh, color="red", line_width=2)
-            self.dashed_meshes.append(mesh)
-            self.dashed_actors.append(actor)
+        # === Layouts ===
+        viewer_layout = QtWidgets.QVBoxLayout()
+        viewer_layout.addWidget(self.plotter.interactor)
 
-        # === Main Layout ===
         main_layout = QtWidgets.QHBoxLayout()
         main_layout.addLayout(viewer_layout, stretch=4)
         main_layout.addLayout(right_panel, stretch=1)
         self.setLayout(main_layout)
 
-        # === Plotter Post-Init ===
+        # === Plotter Setup ===
         QtCore.QTimer.singleShot(0, self.plotter.show_axes)
         QtCore.QTimer.singleShot(0, self.plotter.show_grid)
 
@@ -244,123 +268,152 @@ class GazeTrackingWindow(QtWidgets.QWidget):
             show_point=True
         )
 
+        # === Throttled Render Timer ===
         self.render_timer = QtCore.QTimer()
         self.render_timer.setInterval(100)  # 10 FPS
         self.render_timer.timeout.connect(self.plotter.render)
         self.render_timer.start()
 
-    def update_gaze_visual(self, gaze_data: dict):
+
+    @QtCore.pyqtSlot(object, float, int, float)
+    def update_gaze_data(self, gaze_line, roi, intercept, gaze_distance):
         try:
-            self.current_gaze_data = gaze_data
-            gaze_line = np.array(gaze_data["gaze_line"])
-            if gaze_line.shape != (2, 3):
-                print(f"[Gaze] Invalid gaze line shape: {gaze_line.shape}")
+            gaze_arr = np.array(gaze_line)
+            if gaze_arr.shape != (2, 3):
+                print(f"[GazeTracking] Invalid gaze shape: {gaze_arr.shape}")
                 return
 
-            origin = gaze_line[0]
-            direction = gaze_line[1]
+            origin = gaze_arr[0]
+            direction = gaze_arr[1]
             length = np.linalg.norm(direction)
+
             if length == 0:
                 target = origin
-                norm_direction = np.array([0.0, 0.0, 0.0])
             else:
-                norm_direction = direction / length
-                target = origin + norm_direction * GAZE_LINE_LENGTH
+                # Approximate dynamic line length using distance to transformed first peg
+                gaze_length = GAZE_LINE_LENGTH
+                if hasattr(self, "latest_pegs") and len(self.latest_pegs) > 0:
+                    idx = self.matrix_group.checkedId()
+                    if 0 <= idx < len(self.transform_matrices):
+                        pt_h = np.append(self.latest_pegs[0], 1.0)
+                        transformed = (self.transform_matrices[idx] @ pt_h)[:3]
+                        gaze_length = np.linalg.norm(transformed)
 
-            A, B = origin, target
-            self.latest_gaze_line = [A, B]
-            cone_center = A + 0.5 * (B - A)
+                target = origin + (direction / length) * gaze_length
 
-            # Update or create gaze line
-            line_points = np.array([A, B])
-            if hasattr(self, "line_mesh") and self.line_mesh is not None:
-                self.line_mesh.points = pv.pyvista_ndarray(line_points)
-                self.line_mesh.lines = np.array([2, 0, 1])
-                self.line_mesh.Modified()
-            else:
-                self.line_mesh = pv.PolyData()
-                self.line_mesh.points = pv.pyvista_ndarray(line_points)
-                self.line_mesh.lines = np.array([2, 0, 1])
-                self.gaze_line_actor = self.plotter.add_mesh(self.line_mesh, color="green", line_width=3)
+            self.latest_gaze_line = np.array([origin, target])
+            self.latest_roi = roi
+            self.latest_intercept = intercept
+            self.latest_gaze_distance = gaze_distance
 
-            # Create or update disc at end point and cone from origin
-            if hasattr(self, "disc_mesh"):
-                disc = pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction, r_res=1, c_res=10)
-                self.disc_mesh.deep_copy(disc)
-                self.disc_mesh.Modified()
-            else:
-                self.disc_mesh = pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction, r_res=1, c_res=10)
-                self.disc_actor = self.plotter.add_mesh(self.disc_mesh, color="yellow", opacity=0.5)
+            self.gaze_distance_label.setText(f"Gaze Distance: {gaze_distance:.2f} mm")
+            self._update_gaze_line()
+        except Exception as e:
+            print(f"[GazeTracking] Failed to update visuals: {e}")
 
-            intercept = int(gaze_data.get("intercept", 0))  # from JSON
-            cone_color = "green" if intercept else "red"
+    def _update_gaze_line(self):
+        if self.latest_gaze_line is None or not hasattr(self, "latest_pegs"):
+            return
+
+        A, B = self.latest_gaze_line
+        cone_center = A + 0.5 * (B - A)
+        direction = B - A
+        length = np.linalg.norm(direction)
+        if length == 0:
+            return
+        norm_direction = direction / length
+        height = float(length)
+
+        # === 1. Gaze Line ===
+        line = pv.Line(A, B)
+        if hasattr(self, "gaze_line_mesh"):
+            self.gaze_line_mesh.deep_copy(line)
+            self.gaze_line_mesh.Modified()
+        else:
+            self.gaze_line_mesh = line
+            self.gaze_line_actor = self.plotter.add_mesh(self.gaze_line_mesh, color="green", line_width=3)
+
+        # === 2. Disc at End ===
+        disc = pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction, r_res=1, c_res=10)
+        if hasattr(self, "disc_mesh"):
+            self.disc_mesh.deep_copy(disc)
+            self.disc_mesh.Modified()
+        else:
+            self.disc_mesh = disc
+            self.disc_actor = self.plotter.add_mesh(self.disc_mesh, color="yellow", opacity=0.5)
+
+        # === 3. Cone from Origin ===
+        cone_color = "green" if self.latest_intercept else "red"
+        cone = pv.Cone(center=cone_center, direction=-norm_direction, height=height, radius=DISC_RADIUS)
+        if hasattr(self, "cone_mesh"):
+            self.cone_mesh.deep_copy(cone)
+            self.cone_mesh.Modified()
             if hasattr(self, "cone_actor"):
                 self.cone_actor.GetProperty().SetColor(Color(cone_color).float_rgb)
+        else:
+            self.cone_mesh = cone
+            self.cone_actor = self.plotter.add_mesh(self.cone_mesh, color=cone_color, opacity=0.3)
 
-            if hasattr(self, "cone_mesh"):
-                cone = pv.Cone(center=cone_center, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS)
-                self.cone_mesh.deep_copy(cone)
-                self.cone_mesh.Modified()
+        # === 4. Original Pegs (all 6) ===
+        for actor in getattr(self, "peg_actors", []):
+            self.plotter.remove_actor(actor)
+        self.peg_actors = []
+
+        pegs = np.array(self.latest_pegs)
+        for peg in pegs:
+            actor = self.plotter.add_points(np.array([peg]), color="purple", point_size=12, render_points_as_spheres=True)
+            self.peg_actors.append(actor)
+
+        # === 5. Transformed Pegs (all 6) ===
+        for actor in getattr(self, "transformed_peg_actors", []):
+            self.plotter.remove_actor(actor)
+        self.transformed_peg_actors = []
+
+        idx = self.matrix_group.checkedId()
+        if 0 <= idx < len(self.transform_matrices):
+            matrix = self.transform_matrices[idx]
+            transformed_pegs = [matrix @ np.append(p, 1.0) for p in pegs]
+            transformed_pegs = np.array([p[:3] for p in transformed_pegs])
+
+            for i, peg in enumerate(transformed_pegs):
+                color = "#300053"  # dark purple for transformed pegs
+                actor = self.plotter.add_points(np.array([peg]), color=color, point_size=12, render_points_as_spheres=True)
+                self.transformed_peg_actors.append(actor)
+
+            # === 6. ROI Sphere + Animated Line (for first peg only) ===
+            peg = transformed_pegs[self.peg_of_interest_index] # peg of interest
+            if hasattr(self, "roi_sphere_mesh"):
+                sphere = pv.Sphere(radius=self.latest_roi, center=peg)
+                self.roi_sphere_mesh.deep_copy(sphere)
+                self.roi_sphere_mesh.Modified()
             else:
-                self.cone_mesh = pv.Cone(center=cone_center, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS)
-                self.cone_actor = self.plotter.add_mesh(self.cone_mesh, color="orange", opacity=0.3)
+                self.roi_sphere_mesh = pv.Sphere(radius=self.latest_roi, center=peg)
+                self.roi_sphere_actor = self.plotter.add_mesh(self.roi_sphere_mesh, color="green", opacity=0.2)
 
-            gaze_distance = float(gaze_data.get("gaze_distance", 0.0))
-            self.gaze_distance_label.setText(f"Gaze Distance: {gaze_distance:.2f} mm")
+            def closest_point_on_line(p, a, b):
+                ab = b - a
+                t = np.dot(p - a, ab) / np.dot(ab, ab)
+                t = np.clip(t, 0, 1)
+                return a + t * ab
 
-            # Pegs
-            if "pegs" in gaze_data:
-                for actor in getattr(self, "peg_actors", []):
-                    self.plotter.remove_actor(actor)
-                self.peg_actors = []
+            closest_point = closest_point_on_line(peg, A, B)
+            dashed_pairs = np.linspace(closest_point, peg, self.dashed_segments * 2).reshape(-1, 2, 3)
 
-                original_pegs = np.array(gaze_data["pegs"])
-                idx = self.matrix_group.checkedId()
-                if 0 <= idx < len(self.transform_matrices):
-                    matrix = self.transform_matrices[idx]
-                    pegs = [matrix @ np.append(p, 1.0) for p in original_pegs]
-                    pegs = np.array([p[:3] for p in pegs])
+            for i in range(self.dashed_segments):
+                if i < len(dashed_pairs) and i % 2 == 0:
+                    start, end = dashed_pairs[i]
+                    mesh = self.dashed_meshes[i // 2]
+                    mesh.points = np.array([start, end])
+                    mesh.lines = np.array([2, 0, 1])
+                    mesh.Modified()
                 else:
-                    pegs = original_pegs
+                    self.dashed_meshes[i // 2].points = np.array([[0, 0, 0], [0, 0, 0]])
+                    self.dashed_meshes[i // 2].Modified()
 
-                def point_line_distance(p, a, b):
-                    ap = p - a
-                    ab = b - a
-                    t = max(0, min(1, np.dot(ap, ab) / np.dot(ab, ab)))
-                    closest = a + t * ab
-                    return np.linalg.norm(p - closest), closest
-
-                closest_peg, closest_point, min_dist = None, None, float("inf")
-                for peg in pegs:
-                    dist, proj = point_line_distance(peg, A, B)
-                    if dist < min_dist:
-                        min_dist = dist
-                        closest_peg = peg
-                        closest_point = proj
-
-                for peg in pegs:
-                    is_closest = closest_peg is not None and np.allclose(peg, closest_peg)
-                    color = "red" if is_closest else "blue"
-                    actor = self.plotter.add_points(np.array([peg]), color=color, point_size=12, render_points_as_spheres=True)
-                    self.peg_actors.append(actor)
-
-                if closest_point is not None and closest_peg is not None:
-                    dashed_pairs = np.linspace(closest_point, closest_peg, self.dashed_segments * 2).reshape(-1, 2, 3)
-                    for i in range(self.dashed_segments):
-                        if i < len(dashed_pairs) and i % 2 == 0:
-                            start, end = dashed_pairs[i]
-                            mesh = self.dashed_meshes[i // 2]
-                            mesh.points = np.array([start, end])
-                            mesh.lines = np.array([2, 0, 1])
-                            mesh.Modified()
-                        else:
-                            self.dashed_meshes[i // 2].points = np.array([[0, 0, 0], [0, 0, 0]])
-                            self.dashed_meshes[i // 2].Modified()
-
-            QtWidgets.QApplication.processEvents()
-
-        except Exception as e:
-            print(f"[GazeTracking] Failed to update: {e}")
+    def set_peg_of_interest(self, index: int):
+        self.peg_of_interest_index = index
+        print(f"[GazeTracking] Peg of interest set to: {index}")
+        self._update_gaze_line()
 
     def reset_view(self):
         self.plotter.view_isometric()
