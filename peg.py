@@ -7,6 +7,7 @@ class Peg:
         self.kf = self._init_kalman_filter()
         self.initialized = False
         self.skipped_frames = 0
+        self.last_position = None
 
     def _init_kalman_filter(self):
         kf = cv2.KalmanFilter(6, 3)  # state: [x, y, z, vx, vy, vz] ; measurement: [x, y, z]
@@ -51,6 +52,7 @@ class Peg:
             self.skipped_frames += 1
             print(f"[SKIP] Peg {self.id}: No valid measurement, using prediction")
 
+        self.last_position = self.get_position()
         self.kf.predict()
 
     def get_position(self):

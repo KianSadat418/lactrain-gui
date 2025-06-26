@@ -228,19 +228,6 @@ def find_pairs(left_points, right_points):
 
     return best_pair
 
-
-
-def trasformed_pegs(pegs):
-    """Transform 3D points from camera coordinates to world coordinates using the transformation matrix."""
-    transformedPegs = []
-
-    for i, (x, y, z) in enumerate(pegs):
-        p = np.array([x, y, z, 1.0])
-        p_transformed = transformation_matrix @ p
-        transformedPegs.append(p_transformed[:3])
-
-    return transformedPegs
-
 def find_3D_points(left_points, right_points):
     points_3D = []
     for pt_left, pt_right in zip(left_points, right_points):
@@ -293,11 +280,26 @@ def assign_points_to_pegs(triangulated_points, pegs):
             cost_matrix[i][j] = np.linalg.norm(peg_pos - new_pt)
 
     row_ind, col_ind = linear_sum_assignment(cost_matrix)
+    # Compute movement deltas
+    deltas = []
     for i, j in zip(row_ind, col_ind):
-        if cost_matrix[i][j] < 50:  # Reject bad matches with large jumps
+        old_pos = pegs[i].last_position
+        new_pos = triangulated_points[j]
+        if old_pos is None:
+            deltas.append(np.inf)
+        else:
+            deltas.append(np.linalg.norm(old_pos - new_pos))
+
+    # Find the peg that moved the most
+    moving_idx = np.argmax(deltas)
+    print(f"[INFO] Peg {moving_idx} is moving (Δ={deltas[moving_idx]:.2f})")
+
+    # Only update the moving peg
+    for i, j in zip(row_ind, col_ind):
+        if i == moving_idx or deltas[i] < 1.0:
             pegs[i].update(triangulated_points[j])
         else:
-            pass  # Keep last known position
+            pegs[i].update(None)
 
 pegs = [Peg(i) for i in range(6)]
 
