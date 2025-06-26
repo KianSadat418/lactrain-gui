@@ -171,6 +171,14 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         self.latest_pegs = []
         self.latest_gaze_distance = 0.0
 
+        # Original Peg Mesh (all 6)
+        self.peg_mesh = pv.PolyData(np.zeros((6, 3)))
+        self.peg_mesh_actor = self.plotter.add_mesh(self.peg_mesh, color="purple", point_size=12, render_points_as_spheres=True)
+
+        # Transformed Peg Mesh (all 6)
+        self.transformed_peg_mesh = pv.PolyData(np.zeros((6, 3)))
+        self.transformed_peg_actor = self.plotter.add_mesh(self.transformed_peg_mesh, color="#300053", point_size=12, render_points_as_spheres=True)
+
         # === Plotter ===
         self.plotter = QtInteractor(self)
 
@@ -358,30 +366,19 @@ class GazeTrackingWindow(QtWidgets.QWidget):
             self.cone_actor = self.plotter.add_mesh(self.cone_mesh, color=cone_color, opacity=0.3)
 
         # === 4. Original Pegs (all 6) ===
-        for actor in getattr(self, "peg_actors", []):
-            self.plotter.remove_actor(actor)
-        self.peg_actors = []
-
         pegs = np.array(self.latest_pegs)
-        for peg in pegs:
-            actor = self.plotter.add_points(np.array([peg]), color="purple", point_size=12, render_points_as_spheres=True)
-            self.peg_actors.append(actor)
+        if pegs.shape == (6, 3):
+            self.peg_mesh.deep_copy(pv.PolyData(pegs))
+            self.peg_mesh.Modified()
 
         # === 5. Transformed Pegs (all 6) ===
-        for actor in getattr(self, "transformed_peg_actors", []):
-            self.plotter.remove_actor(actor)
-        self.transformed_peg_actors = []
-
         idx = self.matrix_group.checkedId()
-        if 0 <= idx < len(self.transform_matrices):
+        if 0 <= idx < len(self.transform_matrices) and pegs.shape == (6, 3):
             matrix = self.transform_matrices[idx]
-            transformed_pegs = [matrix @ np.append(p, 1.0) for p in pegs]
-            transformed_pegs = np.array([p[:3] for p in transformed_pegs])
+            transformed_pegs = np.array([(matrix @ np.append(p, 1.0))[:3] for p in pegs])
 
-            for i, peg in enumerate(transformed_pegs):
-                color = "#300053"  # dark purple for transformed pegs
-                actor = self.plotter.add_points(np.array([peg]), color=color, point_size=12, render_points_as_spheres=True)
-                self.transformed_peg_actors.append(actor)
+            self.transformed_peg_mesh.deep_copy(pv.PolyData(transformed_pegs))
+            self.transformed_peg_mesh.Modified()
 
             # === 6. ROI Sphere + Animated Line (for first peg only) ===
             peg = transformed_pegs[self.peg_of_interest_index] # peg of interest
@@ -785,7 +782,7 @@ class MainWindow(QtWidgets.QWidget):
                     self.validation_dashed_meshes[i // 2].Modified()
 
     @QtCore.pyqtSlot(object, float, int, float, object)
-    def update_gaze_data(self, gaze_line, roi, intercept, gaze_distance, pegs):
+    def receive_gaze_data(self, gaze_line, roi, intercept, gaze_distance, pegs):
         if hasattr(self, "gaze_window") and self.gaze_window:
             self.gaze_window.update_gaze_data(gaze_line, roi, intercept, gaze_distance, pegs)
 
