@@ -570,7 +570,17 @@ class MainWindow(QtWidgets.QWidget):
             if length == 0:
                 target = origin
             else:
-                target = origin + (direction / length) * GAZE_LINE_LENGTH
+                # Determine distance of transformed validation peg from origin
+                gaze_length = GAZE_LINE_LENGTH  # fallback
+                if self.peg_validation_point is not None:
+                    idx = self.matrix_group.checkedId()
+                    if 0 <= idx < len(self.transform_matrices):
+                        pt_h = np.append(self.peg_validation_point, 1.0)
+                        transformed = (self.transform_matrices[idx] @ pt_h)[:3]
+                        gaze_length = np.linalg.norm(transformed)
+
+                # Use dynamic length for target
+                target = origin + (direction / length) * gaze_length
 
             self.latest_validation_gaze = np.array([origin, target])
             self.latest_validation_roi = float(roi)
