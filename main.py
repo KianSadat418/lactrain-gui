@@ -20,7 +20,7 @@ MATRIX_BUTTON_LABELS = [
 
 # Length of the gaze ray and radius of the disc at the end of the line
 GAZE_LINE_LENGTH = 450.0
-DISC_RADIUS = 50.0
+DISC_RADIUS = 40.0
 
 class DataReceiver(QtCore.QThread):
     updated_points = QtCore.pyqtSignal(list, list)
@@ -63,6 +63,7 @@ class DataReceiver(QtCore.QThread):
                         gaze_line = np.array(data.get("gaze_line"))
                         roi_radius = float(data.get("roi", 0.0))
                         intercept = int(data.get("intercept", 0))
+                        gaze_distance = float(data.get("gaze_distance", 0.0))
 
                         # Send visual data to main window
                         QtCore.QMetaObject.invokeMethod(
@@ -70,7 +71,8 @@ class DataReceiver(QtCore.QThread):
                             QtCore.Qt.QueuedConnection,
                             QtCore.Q_ARG(object, gaze_line),
                             QtCore.Q_ARG(float, roi_radius),
-                            QtCore.Q_ARG(int, intercept)
+                            QtCore.Q_ARG(int, intercept),
+                            QtCore.Q_ARG(float, gaze_distance)
                         )
                     except Exception as e:
                         print(f"[Receiver] Error parsing or handling V message: {e}")
@@ -413,6 +415,18 @@ class MainWindow(QtWidgets.QWidget):
             show_point=True
         )
 
+        # Dashed line setup (20 segments = 10 dashes)
+        self.dashed_segments = 10
+        self.validation_dashed_meshes = []
+        self.validation_dashed_actors = []
+        for _ in range(self.dashed_segments):
+            mesh = pv.PolyData()
+            mesh.points = pv.pyvista_ndarray([[0, 0, 0], [0, 0, 0]])
+            mesh.lines = np.array([2, 0, 1])
+            actor = self.plotter.add_mesh(mesh, color="red", line_width=2)
+            self.validation_dashed_meshes.append(mesh)
+            self.validation_dashed_actors.append(actor)
+
         self.cam_checkbox = QtWidgets.QCheckBox("Show Camera Points")
         self.cam_checkbox.setChecked(True)
         self.holo_checkbox = QtWidgets.QCheckBox("Show HoloLens Points")
@@ -424,13 +438,11 @@ class MainWindow(QtWidgets.QWidget):
         self.zoom_out_button = QtWidgets.QPushButton("-")
 
         self.rmse_label = QtWidgets.QLabel("RMSE: N/A")
+        self.gaze_distance_label = QtWidgets.QLabel("Gaze Distance: N/A")
 
         self.latest_validation_gaze = None
         self.latest_validation_roi = 0.0
         self.latest_validation_intercept = 0
-
-        self.validation_line_mesh = pv.PolyData()
-        self.validation_gaze_line_actor = self.plotter.add_mesh(self.validation_line_mesh, color="red", line_width=3, render=True)
 
         # Right side configuration panel
         options_group = QtWidgets.QGroupBox("Options")
@@ -501,6 +513,7 @@ class MainWindow(QtWidgets.QWidget):
         gaze_group.setLayout(gaze_layout)
         right_layout.addWidget(gaze_group)
         right_layout.addWidget(self.rmse_label)
+        right_layout.addWidget(self.gaze_distance_label)
 
         layout = QtWidgets.QHBoxLayout(self)
         layout.addWidget(self.plotter.interactor, 1)
@@ -541,8 +554,8 @@ class MainWindow(QtWidgets.QWidget):
         self.peg_validation_point = point
         # Mesh updates are now handled in the _update_validation_gaze_line method via timer.
 
-    @QtCore.pyqtSlot(object, float, int)
-    def update_validation_gaze(self, gaze_line, roi, intercept):
+    @QtCore.pyqtSlot(object, float, int, float)
+    def update_validation_gaze(self, gaze_line, roi, intercept, gaze_distance):
         """Receive latest validation gaze data from the socket."""
 
         try:
@@ -563,15 +576,9 @@ class MainWindow(QtWidgets.QWidget):
             self.latest_validation_roi = float(roi)
             self.latest_validation_intercept = int(intercept)
 
-            # Update line color immediately based on intercept
-            color = "red" if self.latest_validation_intercept else "green"
-            self.validation_gaze_line_actor.GetProperty().SetColor(Color(color).float_rgb)
+            self.gaze_distance_label.setText(f"Gaze Distance: {gaze_distance:.2f} mm")
 
-            # Ensure line mesh has proper topology
-            self.validation_line_mesh.lines = np.array([2, 0, 1])
-            self.validation_line_mesh.Modified()
-
-            # Trigger immediate render update
+            self._update_validation_gaze_line()
             self.plotter.render()
         except Exception as e:
             print(f"[MainWindow] Failed to update validation gaze visuals: {e}")
@@ -589,10 +596,18 @@ class MainWindow(QtWidgets.QWidget):
             return
         norm_direction = direction / length
 
-        # === 1. Update Line Mesh ===
-        self.validation_line_mesh.points = pv.pyvista_ndarray([A, B])
-        self.validation_line_mesh.lines = np.array([2, 0, 1])
-        self.validation_line_mesh.Modified()
+        # === 1. Create or update gaze line ===
+        line = pv.Line(A, B)
+        if hasattr(self, "validation_line_mesh"):
+            self.validation_line_mesh.deep_copy(line)
+            self.validation_line_mesh.Modified()
+        else:
+            self.validation_line_mesh = line
+            self.validation_gaze_line_actor = self.plotter.add_mesh(
+                self.validation_line_mesh,
+                color="green",  # Will be updated dynamically
+                line_width=3
+            )
 
         # === 2. Disc at endpoint ===
         if hasattr(self, "validation_disc_mesh"):
@@ -604,13 +619,22 @@ class MainWindow(QtWidgets.QWidget):
             self.validation_disc_actor = self.plotter.add_mesh(self.validation_disc_mesh, color="cyan", opacity=0.5)
 
         # === 3. Cone from origin to disc ===
+        cone_color = "green" if self.latest_validation_intercept else "red"
+
+        cone = pv.Cone(center=cone_center, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS)
         if hasattr(self, "validation_cone_mesh"):
-            cone = pv.Cone(center=cone_center, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS)
             self.validation_cone_mesh.deep_copy(cone)
             self.validation_cone_mesh.Modified()
+            # Update actor color (reuses actor)
+            if hasattr(self, "validation_cone_actor"):
+                self.validation_cone_actor.GetProperty().SetColor(Color(cone_color).float_rgb)
         else:
-            self.validation_cone_mesh = pv.Cone(center=cone_center, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS)
-            self.validation_cone_actor = self.plotter.add_mesh(self.validation_cone_mesh, color="orange", opacity=0.3)
+            self.validation_cone_mesh = cone
+            self.validation_cone_actor = self.plotter.add_mesh(
+                self.validation_cone_mesh,
+                color=cone_color,
+                opacity=0.3
+            )
 
         # --- 4. Validation Peg (real and transformed) with ROI sphere ---
         if self.peg_validation_point is not None:
@@ -658,6 +682,32 @@ class MainWindow(QtWidgets.QWidget):
                     self.validation_sphere_actor = self.plotter.add_mesh(
                         self.validation_sphere_mesh, color="green", opacity=0.2
                     )
+
+        # === 5. Animated dashed line from closest peg to gaze line ===
+        if self.peg_validation_point is not None and self.latest_validation_gaze is not None:
+            peg = self.peg_validation_point
+            A, B = self.latest_validation_gaze
+
+            def closest_point_on_line(p, a, b):
+                ab = b - a
+                t = np.dot(p - a, ab) / np.dot(ab, ab)
+                t = np.clip(t, 0, 1)
+                return a + t * ab
+
+            closest_point = closest_point_on_line(peg, A, B)
+            dashed_pairs = np.linspace(closest_point, peg, self.dashed_segments * 2).reshape(-1, 2, 3)
+
+            for i in range(self.dashed_segments):
+                if i < len(dashed_pairs) and i % 2 == 0:
+                    start, end = dashed_pairs[i]
+                    mesh = self.validation_dashed_meshes[i // 2]
+                    mesh.points = np.array([start, end])
+                    mesh.lines = np.array([2, 0, 1])
+                    mesh.Modified()
+                else:
+                    # Collapse unused segments
+                    self.validation_dashed_meshes[i // 2].points = np.array([[0, 0, 0], [0, 0, 0]])
+                    self.validation_dashed_meshes[i // 2].Modified()
 
         self.plotter.render()
 
