@@ -86,7 +86,7 @@ class DataReceiver(QtCore.QThread):
 
                         # Emit to gaze window
                         QtCore.QMetaObject.invokeMethod(
-                            self.parent(), "update_gaze_data", QtCore.Qt.QueuedConnection,
+                            self.parent(), "receive_gaze_data", QtCore.Qt.QueuedConnection,
                             QtCore.Q_ARG(object, gaze_line),
                             QtCore.Q_ARG(float, roi_radius),
                             QtCore.Q_ARG(int, intercept),
@@ -781,10 +781,11 @@ class MainWindow(QtWidgets.QWidget):
                     self.validation_dashed_meshes[i // 2].points = np.array([[0, 0, 0], [0, 0, 0]])
                     self.validation_dashed_meshes[i // 2].Modified()
 
-    @QtCore.pyqtSlot(dict)
-    def receive_gaze_data(self, gaze_data: dict):
+    @QtCore.pyqtSlot(object, float, int, float)
+    def receive_gaze_data(self, gaze_line, roi, intercept, gaze_distance):
+        # Forward to gaze window if exists
         if hasattr(self, "gaze_window") and self.gaze_window:
-            self.gaze_window.update_gaze_visual(gaze_data)
+            self.gaze_window.update_gaze_data(gaze_line, roi, intercept, gaze_distance)
 
     def reset_view(self):
         """Reset camera orientation with Z axis pointing up."""
