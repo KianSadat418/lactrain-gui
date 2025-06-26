@@ -207,6 +207,20 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         right_panel.addWidget(view_group)
         right_panel.addStretch()
 
+        self.gaze_distance_label = QtWidgets.QLabel("Gaze Distance: N/A")
+        right_panel.addWidget(self.gaze_distance_label)
+
+        self.dashed_segments = 10
+        self.dashed_meshes = []
+        self.dashed_actors = []
+        for _ in range(self.dashed_segments):
+            mesh = pv.PolyData()
+            mesh.points = pv.pyvista_ndarray([[0, 0, 0], [0, 0, 0]])
+            mesh.lines = np.array([2, 0, 1])
+            actor = self.plotter.add_mesh(mesh, color="red", line_width=2)
+            self.dashed_meshes.append(mesh)
+            self.dashed_actors.append(actor)
+
         main_layout = QtWidgets.QHBoxLayout()
         main_layout.addLayout(viewer_layout, stretch=4)
         main_layout.addLayout(right_panel, stretch=1)
@@ -267,6 +281,11 @@ class GazeTrackingWindow(QtWidgets.QWidget):
                 self.disc_mesh = pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction, r_res=1, c_res=10)
                 self.disc_actor = self.plotter.add_mesh(self.disc_mesh, color="yellow", opacity=0.5)
 
+            intercept = int(gaze_data.get("intercept", 0))  # from JSON
+            cone_color = "green" if intercept else "red"
+            if hasattr(self, "cone_actor"):
+                self.cone_actor.GetProperty().SetColor(Color(cone_color).float_rgb)
+
             if hasattr(self, "cone_mesh"):
                 cone = pv.Cone(center=cone_center, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS)
                 self.cone_mesh.deep_copy(cone)
@@ -274,6 +293,9 @@ class GazeTrackingWindow(QtWidgets.QWidget):
             else:
                 self.cone_mesh = pv.Cone(center=cone_center, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS)
                 self.cone_actor = self.plotter.add_mesh(self.cone_mesh, color="orange", opacity=0.3)
+
+            gaze_distance = float(gaze_data.get("gaze_distance", 0.0))
+            self.gaze_distance_label.setText(f"Gaze Distance: {gaze_distance:.2f} mm")
 
             # Pegs
             if "pegs" in gaze_data:
@@ -312,47 +334,23 @@ class GazeTrackingWindow(QtWidgets.QWidget):
                     self.peg_actors.append(actor)
 
                 if closest_point is not None and closest_peg is not None:
-                    segments = 20
-                    dashed_points = np.linspace(closest_point, closest_peg, segments * 2).reshape(-1, 2, 3)
-                    for i, (start, end) in enumerate(dashed_points):
-                        if i % 2 == 0:
-                            self.plotter.add_lines(np.array([start, end]), color="red", width=2)
+                    dashed_pairs = np.linspace(closest_point, closest_peg, self.dashed_segments * 2).reshape(-1, 2, 3)
+                    for i in range(self.dashed_segments):
+                        if i < len(dashed_pairs) and i % 2 == 0:
+                            start, end = dashed_pairs[i]
+                            mesh = self.dashed_meshes[i // 2]
+                            mesh.points = np.array([start, end])
+                            mesh.lines = np.array([2, 0, 1])
+                            mesh.Modified()
+                        else:
+                            self.dashed_meshes[i // 2].points = np.array([[0, 0, 0], [0, 0, 0]])
+                            self.dashed_meshes[i // 2].Modified()
 
             self.plotter.render()
             QtWidgets.QApplication.processEvents()
 
         except Exception as e:
             print(f"[GazeTracking] Failed to update: {e}")
-
-    def _update_gaze_line_actor(self):
-        if self.latest_gaze_line is None or len(self.latest_gaze_line) != 2:
-            return
-
-        points = np.array(self.latest_gaze_line)
-        if points.shape != (2, 3):
-            return
-
-        # Update line geometry
-        self.line_mesh.points = pv.pyvista_ndarray(points)
-        self.line_mesh.lines = np.array([2, 0, 1])  # VTK line: n_points, i0, i1
-        self.line_mesh.Modified()
-
-        # Update disc and cone based on latest orientation
-        origin, target = points
-        direction = target - origin
-        length = np.linalg.norm(direction)
-        if length > 0:
-            norm_direction = direction / length
-            if hasattr(self, "disc_mesh"):
-                disc = pv.Disc(center=target, inner=0.0, outer=DISC_RADIUS, normal=norm_direction, r_res=1, c_res=10)
-                self.disc_mesh.deep_copy(disc)
-                self.disc_mesh.Modified()
-            if hasattr(self, "cone_mesh"):
-                cone = pv.Cone(center=target, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS)
-                self.cone_mesh.deep_copy(cone)
-                self.cone_mesh.Modified()
-        self.plotter.render()
-
 
     def reset_view(self):
         self.plotter.view_isometric()
