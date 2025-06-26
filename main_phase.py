@@ -12,6 +12,8 @@ from typing import Union
 import itertools
 import struct
 
+from peg import Peg
+
 
 model = YOLO("Assets/Scripts/Peg-Detection-Scripts/Training-05-22/result/content/runs/detect/yolo8_peg_detector/weights/best.pt")
 calib = np.load("Assets/Scripts/Camera Calibration/stereo_camera_calibration2.npz")
@@ -44,6 +46,7 @@ count = 0
 
 pegs = {str(i): ([0, 0], [0, 0], [0, 0, 0]) for i in range(1, 7)}
 isInitialized = False
+peg_trackers = [Peg(i + 1) for i in range(6)]
 
 def send_frame_left(frame, frame_id=0):
     _, buffer = cv2.imencode(".jpg", frame)
@@ -211,40 +214,60 @@ def res_without_rectify(right_frame, left_frame):
 def initialize_pegs(left_frame_peg, right_frame_peg, pegsIn3D):
     for i in range(6):
         pegs[str(i+1)] = (left_frame_peg[i], right_frame_peg[i], pegsIn3D[i])
+        peg_trackers[i].update(pegsIn3D[i])
 
 def pegTracking(left_frame_peg, right_frame_peg):
-    isFound = [False for _ in range(6)]
-    isUsedLeft = [False for _ in range(len(left_frame_peg))]
-    isUsedRight = [False for _ in range(len(right_frame_peg))]
+    if left_frame_peg is None or right_frame_peg is None:
+        for tracker in peg_trackers:
+            tracker.update(None)
+        return
 
-    threshold2D = 15.0
-    threshold3D = 30.0
+    threshold2D = 20.0
+    threshold3D = 40.0
+
+    left_cost = np.zeros((6, len(left_frame_peg)))
+    right_cost = np.zeros((6, len(right_frame_peg)))
+
     for i in range(6):
-        prev_left, prev_right, prev_3d = pegs[str(i+1)]
-        min_dist = float('inf')
-        best_left = None
-        best_right = None
-        for lp in left_frame_peg:
-            if isUsedLeft[left_frame_peg.index(lp)]:
-                continue
-            dist = np.linalg.norm(np.array(lp) - np.array(prev_left))
-            if dist < threshold2D:
-                best_left = lp
+        prev_left, prev_right, _ = pegs[str(i+1)]
+        for j, lp in enumerate(left_frame_peg):
+            left_cost[i, j] = np.linalg.norm(np.array(lp) - np.array(prev_left))
+        for j, rp in enumerate(right_frame_peg):
+            right_cost[i, j] = np.linalg.norm(np.array(rp) - np.array(prev_right))
 
-        for rp in right_frame_peg:
-            if isUsedRight[right_frame_peg.index(rp)]:
-                continue
-            dist = np.linalg.norm(np.array(rp) - np.array(prev_right))
-            if dist < threshold2D:
-                best_right = rp
+    row_l, col_l = linear_sum_assignment(left_cost)
+    row_r, col_r = linear_sum_assignment(right_cost)
 
-        if best_left is not None and best_right is not None:
-            pegin3D = find_3D_points([best_left], [best_right])[0]
-            if np.linalg.norm(np.array(pegin3D) - np.array(prev_3d)) < threshold3D:
-                isUsedLeft[left_frame_peg.index(best_left)] = True
-                isUsedRight[right_frame_peg.index(best_right)] = True
-                isFound[i] = True
-                pegs[str(i+1)] = (best_left, best_right, pegin3D)
+    left_assign = {r: c for r, c in zip(row_l, col_l)}
+    right_assign = {r: c for r, c in zip(row_r, col_r)}
+
+    for i in range(6):
+        key = str(i+1)
+        prev_left, prev_right, prev_3d = pegs[key]
+
+        li = left_assign.get(i)
+        ri = right_assign.get(i)
+
+        if li is not None and left_cost[i, li] < threshold2D:
+            left_pt = left_frame_peg[li]
+        else:
+            left_pt = prev_left
+
+        if ri is not None and right_cost[i, ri] < threshold2D:
+            right_pt = right_frame_peg[ri]
+        else:
+            right_pt = prev_right
+
+        measured_3d = None
+        if li is not None and ri is not None and left_cost[i, li] < threshold2D and right_cost[i, ri] < threshold2D:
+            candidate = find_3D_points([left_pt], [right_pt])[0]
+            if np.linalg.norm(np.array(candidate) - np.array(prev_3d)) < threshold3D:
+                measured_3d = candidate
+
+        peg_trackers[i].update(measured_3d)
+        current_3d = peg_trackers[i].get_position()
+
+        pegs[key] = (left_pt, right_pt, current_3d)
 
 if __name__ == "__main__":
 
