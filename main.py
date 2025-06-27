@@ -631,6 +631,232 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         super().closeEvent(event)
 
 
+class PlaybackWindow(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Playback Mode")
+        self.setMinimumSize(800, 600)
+
+        # === Core Data and Playback State ===
+        self.frames = []
+        self.current_index = 0
+        self.is_playing = False
+
+        # === PyVista Plotter ===
+        self.plotter = QtInteractor(self)
+        self.gaze_line_actor = None
+        self.disc_actor = None
+        self.cone_actor = None
+        self.peg_actor = None
+
+        # === Timer for Playback ===
+        self.timer = QtCore.QTimer()
+        self.timer.setInterval(100)  # 100 ms = 10 FPS
+        self.timer.timeout.connect(self.advance_frame)
+
+        # === Viewer Controls ===
+        self.reset_button = QtWidgets.QPushButton("Reset View")
+        self.zoom_in_button = QtWidgets.QPushButton("+")
+        self.zoom_out_button = QtWidgets.QPushButton("-")
+        self.fix_view_checkbox = QtWidgets.QCheckBox("Fix View")
+        self.fix_view_checkbox.setChecked(False)
+
+        # === Analysis Buttons (stubs for now) ===
+        self.heatmap_button = QtWidgets.QPushButton("Toggle Heatmap (TODO)")
+        self.trajectory_button = QtWidgets.QPushButton("Show Peg Trajectory (TODO)")
+
+        # === Scrubber (Frame Slider) ===
+        self.scrubber = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.scrubber.setMinimum(0)
+        self.scrubber.valueChanged.connect(self.update_frame)
+
+        # === Playback Buttons ===
+        self.play_button = QtWidgets.QPushButton("▶ Play")
+        self.pause_button = QtWidgets.QPushButton("⏸ Pause")
+        self.restart_button = QtWidgets.QPushButton("<- Restart")
+        self.play_button.clicked.connect(self.play)
+        self.pause_button.clicked.connect(self.pause)
+        self.restart_button.clicked.connect(self.restart)
+
+        # === Load Recording Button ===
+        self.load_button = QtWidgets.QPushButton("Load Recording")
+        self.load_button.clicked.connect(self.load_recording)
+
+        # === Layouts ===
+        # Viewer Controls Section
+        controls_layout = QtWidgets.QVBoxLayout()
+        controls_layout.addWidget(self.reset_button)
+        controls_layout.addWidget(self.zoom_in_button)
+        controls_layout.addWidget(self.zoom_out_button)
+        controls_layout.addWidget(self.fix_view_checkbox)
+        controls_layout.addWidget(self.heatmap_button)
+        controls_layout.addWidget(self.trajectory_button)
+        controls_layout.addStretch()
+
+        controls_group = QtWidgets.QGroupBox("Controls")
+        controls_group.setLayout(controls_layout)
+
+        # Right Panel with Load + Controls
+        right_panel = QtWidgets.QVBoxLayout()
+        right_panel.addWidget(self.load_button)
+        right_panel.addWidget(controls_group)
+        right_panel.addStretch()
+
+        # Central Area (Viewer + Right Panel)
+        main_layout = QtWidgets.QHBoxLayout()
+        main_layout.addWidget(self.plotter.interactor, stretch=4)
+        main_layout.addLayout(right_panel, stretch=1)
+
+        # Playback Button Row
+        playback_controls = QtWidgets.QHBoxLayout()
+        playback_controls.addWidget(self.play_button)
+        playback_controls.addWidget(self.pause_button)
+        playback_controls.addWidget(self.restart_button)
+
+        # Final Container Layout
+        container_layout = QtWidgets.QVBoxLayout()
+        container_layout.addWidget(self.scrubber)
+        container_layout.addLayout(playback_controls)
+        container_layout.addLayout(main_layout)
+
+        self.setLayout(container_layout)
+
+        # === Final Setup ===
+        self.reset_button.clicked.connect(self.reset_view)
+        self.zoom_in_button.clicked.connect(lambda: self._zoom(1.2))
+        self.zoom_out_button.clicked.connect(lambda: self._zoom(0.8))
+        self.fix_view_checkbox.stateChanged.connect(self.fix_view_bounds)
+
+        self.plotter.show_axes()
+        self.plotter.show_grid()
+
+    def load_recording(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open Recording", "", "JSON Files (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, "r") as f:
+                self.frames = json.load(f)
+            self.scrubber.setMaximum(len(self.frames) - 1)
+            self.current_index = 0
+            self.update_frame()
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Load Error", f"Failed to load recording: {e}")
+
+    def update_frame(self, idx=None):
+        if not self.frames:
+            return
+        if idx is None:
+            idx = self.current_index
+        else:
+            self.current_index = idx
+
+        frame = self.frames[idx]
+        gaze_line = np.array(frame["gaze_data"]["gaze_line"])
+        roi = frame["gaze_data"]["roi"]
+        intercept = frame["gaze_data"]["intercept"]
+        peg_data = np.array(frame["peg_data"])
+
+        A, B = gaze_line
+        self.plotter.clear()
+        self.plotter.show_axes()
+        self.plotter.show_grid()
+
+        # Gaze Line
+        self.plotter.add_mesh(pv.Line(A, B), color="green", line_width=3)
+
+        # Disc
+        direction = B - A
+        norm_direction = direction / np.linalg.norm(direction)
+        self.plotter.add_mesh(
+            pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction),
+            color="yellow", opacity=0.5
+        )
+
+        # Cone
+        center = A + 0.5 * direction
+        color = "green" if intercept else "red"
+        self.plotter.add_mesh(
+            pv.Cone(center=center, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS),
+            color=color, opacity=0.3
+        )
+
+        # Pegs
+        if peg_data.shape == (6, 3):
+            self.plotter.add_mesh(pv.PolyData(peg_data), color="purple", point_size=12, render_points_as_spheres=True)
+
+        self.plotter.render()
+
+    def reset_view(self):
+        self.plotter.view_isometric()
+        self.plotter.reset_camera()
+        self.plotter.render()
+
+    def _zoom(self, factor: float):
+        if hasattr(self.plotter.camera, "Zoom"):
+            self.plotter.camera.Zoom(factor)
+        self.plotter.render()
+
+    def fix_view_bounds(self):
+        # Remove any previously added actors
+        if hasattr(self, "fix_view_actors"):
+            for actor in self.fix_view_actors:
+                self.plotter.remove_actor(actor)
+            self.fix_view_actors = []
+        else:
+            self.fix_view_actors = []
+
+        if self.fix_view_checkbox.isChecked():
+            bounds = np.array([[-100, -100, -100], [600, 600, 600]], dtype=np.float32)
+            origin = np.array([[0, 0, 0]], dtype=np.float32)
+
+            bounds_actor = self.plotter.add_points(
+                bounds,
+                color="white",
+                opacity=0.0,
+                point_size=1,
+                render_points_as_spheres=True
+            )
+            origin_actor = self.plotter.add_points(
+                origin,
+                color="black",
+                point_size=10,
+                render_points_as_spheres=True
+            )
+
+            self.fix_view_actors.extend([bounds_actor, origin_actor])
+
+        self.plotter.render()
+
+    def play(self):
+        if not self.frames:
+            return
+        self.is_playing = True
+        self.timer.start()
+
+    def pause(self):
+        self.is_playing = False
+        self.timer.stop()
+
+    def restart(self):
+        self.current_index = 0
+        self.scrubber.setValue(0)
+        self.update_frame()
+        self.play()
+
+    def advance_frame(self):
+        if not self.frames or not self.is_playing:
+            return
+
+        self.current_index += 1
+        if self.current_index >= len(self.frames):
+            self.timer.stop()
+            self.is_playing = False
+            return
+
+        self.scrubber.setValue(self.current_index)
+
+
 class MainWindow(QtWidgets.QWidget):
     """Main application window."""
     trigger_matrix_mode = QtCore.pyqtSignal()
@@ -1233,9 +1459,8 @@ class MainMenuWindow(QtWidgets.QWidget):
         self.gaze_window.show()
 
     def launch_playback(self):
-        QtWidgets.QMessageBox.information(
-            self, "Playback Mode", "Playback window not implemented yet."
-        )
+        self.playback_window = PlaybackWindow()
+        self.playback_window.show()
 
 
 if __name__ == "__main__":
