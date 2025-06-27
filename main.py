@@ -663,7 +663,8 @@ class PlaybackWindow(QtWidgets.QWidget):
 
         # === Analysis Buttons (stubs for now) ===
         self.heatmap_button = QtWidgets.QPushButton("Toggle Heatmap (TODO)")
-        self.trajectory_button = QtWidgets.QPushButton("Show Peg Trajectory (TODO)")
+        self.trajectory_checkbox = QtWidgets.QCheckBox("Show Peg Trajectories")
+        self.trajectory_checkbox.setChecked(False)
 
         # === Scrubber (Frame Slider) ===
         self.scrubber = QtWidgets.QSlider(QtCore.Qt.Horizontal)
@@ -690,7 +691,7 @@ class PlaybackWindow(QtWidgets.QWidget):
         controls_layout.addWidget(self.zoom_out_button)
         controls_layout.addWidget(self.fix_view_checkbox)
         controls_layout.addWidget(self.heatmap_button)
-        controls_layout.addWidget(self.trajectory_button)
+        controls_layout.addWidget(self.trajectory_checkbox)
         controls_layout.addStretch()
 
         controls_group = QtWidgets.QGroupBox("Controls")
@@ -722,6 +723,7 @@ class PlaybackWindow(QtWidgets.QWidget):
         self.setLayout(container_layout)
 
         # === Final Setup ===
+        self.trajectory_checkbox.stateChanged.connect(lambda _: self.update_frame(self.current_index))
         self.reset_button.clicked.connect(self.reset_view)
         self.zoom_in_button.clicked.connect(lambda: self._zoom(1.2))
         self.zoom_out_button.clicked.connect(lambda: self._zoom(0.8))
@@ -784,6 +786,23 @@ class PlaybackWindow(QtWidgets.QWidget):
         # Pegs
         if peg_data.shape == (6, 3):
             self.plotter.add_mesh(pv.PolyData(peg_data), color="purple", point_size=12, render_points_as_spheres=True)
+
+        # === Draw peg trajectories if checkbox is checked ===
+        if hasattr(self, "trajectory_checkbox") and self.trajectory_checkbox.isChecked():
+            peg_count = len(self.frames[0]["peg_data"])
+            peg_trails = [[] for _ in range(peg_count)]
+
+            for frame in self.frames:
+                for i, peg in enumerate(frame["peg_data"]):
+                    peg_trails[i].append(peg)
+
+            for i, trail in enumerate(peg_trails):
+                trail = np.array(trail)
+                if len(trail) < 2:
+                    continue
+
+                line = pv.Spline(trail, len(trail) * 10)
+                self.plotter.add_mesh(line, color="blue", line_width=3)
 
         self.plotter.render()
 
