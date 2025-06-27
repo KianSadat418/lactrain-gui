@@ -1,5 +1,6 @@
 import sys
 import socket
+from datetime import datetime
 import json
 from typing import List
 import numpy as np
@@ -22,95 +23,183 @@ MATRIX_BUTTON_LABELS = [
 GAZE_LINE_LENGTH = 500.0
 DISC_RADIUS = 40.0
 
+def load_transform_matrices_from_file(path: str):
+    import os
+
+    if not path or not os.path.isfile(path):
+        raise FileNotFoundError("No valid file selected or file does not exist.")
+
+    try:
+        with open(path, "r") as f:
+            matrix_json = json.load(f)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Failed to parse JSON: {e}")
+    except Exception as e:
+        raise ValueError(f"Failed to read file: {e}")
+
+    required_keys = [
+        "similarity_transform", "affine_transform",
+        "similarity_transform_ransac", "affine_transform_ransac"
+    ]
+    transform_matrices = []
+    for key in required_keys:
+        if key not in matrix_json:
+            raise ValueError(f"Missing required key: {key}")
+        matrix_data = matrix_json[key]
+        matrix = np.array(matrix_data).reshape(4, 4)
+        transform_matrices.append(matrix)
+
+    rmse_values = matrix_json.get("rmse", [0, 0, 0, 0])
+    repro_values = matrix_json.get("repro", [0, 0, 0, 0])
+    row_dict = matrix_json.get("rows", {})
+    camera_points = [np.array(p) for p in row_dict.get("Camera", [])]
+    hololens_points = [np.array(p) for p in row_dict.get("Hololens", [])]
+
+    point_rows = []
+    num_rows = len(row_dict.get("Camera", []))
+    for i in range(num_rows):
+        row = [
+            row_dict["Camera"][i],
+            row_dict["Hololens"][i],
+            row_dict["similarity_transformed_B"][i],
+            row_dict["similarity_transform_errors"][i],
+            row_dict["affine_transformed_B"][i],
+            row_dict["affine_transform_errors"][i],
+            row_dict["similarity_transformed_ransac_B"][i],
+            row_dict["similarity_transform_ransac_errors"][i],
+            row_dict["similarity_transform_ransac_mask"][i],
+            row_dict["affine_transformed_ransac_B"][i],
+            row_dict["affine_transform_ransac_errors"][i],
+            row_dict["affine_transform_ransac_mask"][i]
+        ]
+        point_rows.append(row)
+
+    return {
+        "matrices": transform_matrices,
+        "camera_points": camera_points,
+        "hololens_points": hololens_points,
+        "rmse": rmse_values,
+        "repro": repro_values,
+        "rows": point_rows
+    }
+
+
+class Recorder:
+    def __init__(self):
+        self.frames = []
+        self.recording = False
+
+    def start(self):
+        self.frames = []
+        self.recording = True
+        print("[Recorder] Started recording.")
+
+    def stop(self):
+        self.recording = False
+        print("[Recorder] Stopped recording.")
+
+    def log_frame(self, gaze_data, peg_data, transform_id):
+        if self.recording:
+            timestamp = QtCore.QDateTime.currentDateTime().toString(QtCore.Qt.ISODate)
+            self.frames.append({
+                "timestamp": timestamp,
+                "gaze_data": {
+                    "gaze_line": gaze_data.get("gaze_line", []),
+                    "roi": gaze_data.get("roi", 0.0),
+                    "intercept": gaze_data.get("intercept", 0),
+                    "gaze_distance": gaze_data.get("gaze_distance", 0.0)
+                },
+                "peg_data": peg_data,
+                "transform_id": transform_id
+            })
+
+    def save(self, filepath):
+        with open(filepath, "w") as f:
+            json.dump(self.frames, f, indent=2)
+        print(f"[Recorder] Saved {len(self.frames)} frames to {filepath}")
+
+
 class DataReceiver(QtCore.QThread):
     updated_points = QtCore.pyqtSignal(list, list)
     peg_point_received = QtCore.pyqtSignal(np.ndarray)
+    validation_gaze_received = QtCore.pyqtSignal(object, float, int, float)
+    full_gaze_received = QtCore.pyqtSignal(object, float, int, float, object)
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 9991, parent=None):
+    def __init__(self, host="0.0.0.0", port=9991, parent=None):
         super().__init__(parent)
         self.host = host
         self.port = port
         self._running = True
+        self.server_socket = None
 
     def stop(self):
         self._running = False
+        if self.server_socket:
+            try:
+                self.server_socket.close()
+            except Exception as e:
+                print(f"[Receiver] Error closing socket: {e}")
+            self.server_socket = None
 
     def run(self):
         try:
-            server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            server_socket.bind((self.host, self.port))
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.server_socket.bind((self.host, self.port))
+            self.server_socket.setblocking(False)
         except Exception as e:
             print(f"[Receiver] Failed to start server: {e}")
+            return
 
         while self._running:
             try:
-                data, addr = server_socket.recvfrom(650000)
-                if not data:
-                    continue
-                line = data.decode('utf-8').strip()
-                if line.startswith("M"):
-                    QtCore.QMetaObject.invokeMethod(
-                        self.parent(), "trigger_matrix_mode", QtCore.Qt.QueuedConnection
-                    )
-                elif line.startswith("V"):
-                    try:
-                        data = json.loads(line[1:])
-                        x, y, z = float(data["x"]), float(data["y"]), float(data["z"])
-                        point = np.array([x, y, z])
-                        self.peg_point_received.emit(point)
-
-                        # Additional gaze-related fields
-                        gaze_line = np.array(data.get("gaze_line"))
-                        roi_radius = float(data.get("roi", 0.0))
-                        intercept = int(data.get("intercept", 0))
-                        gaze_distance = float(data.get("gaze_distance", 0.0))
-
-                        # Send visual data to main window
-                        QtCore.QMetaObject.invokeMethod(
-                            self.parent(), "update_validation_gaze",
-                            QtCore.Qt.QueuedConnection,
-                            QtCore.Q_ARG(object, gaze_line),
-                            QtCore.Q_ARG(float, roi_radius),
-                            QtCore.Q_ARG(int, intercept),
-                            QtCore.Q_ARG(float, gaze_distance)
-                        )
-                    except Exception as e:
-                        print(f"[Receiver] Error parsing or handling V message: {e}")
-                elif line.startswith("G"):
-                    try:
-                        data = json.loads(line[1:])
-                        gaze_line = np.array(data.get("gaze_line"))
-                        roi_radius = float(data.get("roi", 0.0))
-                        intercept = int(data.get("intercept", 0))
-                        gaze_distance = float(data.get("gaze_distance", 0.0))
-                        pegs = np.array(data.get("pegs", []))
-
-                        # Emit to gaze window
-                        QtCore.QMetaObject.invokeMethod(
-                            self.parent(), "receive_gaze_data", QtCore.Qt.QueuedConnection,
-                            QtCore.Q_ARG(object, gaze_line),
-                            QtCore.Q_ARG(float, roi_radius),
-                            QtCore.Q_ARG(int, intercept),
-                            QtCore.Q_ARG(float, gaze_distance),
-                            QtCore.Q_ARG(object, pegs)
-                        )
-                    except Exception as e:
-                        print(f"[Receiver] Error parsing G message: {e}")
-                else:
-                    data = json.loads(line)
-                    camera_points = []
-                    holo_points = []
-                    for key, value in data.items():
-                        cam = np.array(value[0])
-                        holo = np.array(value[1])
-                        camera_points.append(cam)
-                        holo_points.append(holo)
-                    self.updated_points.emit(camera_points, holo_points)
-            except json.JSONDecodeError:
+                data, addr = self.server_socket.recvfrom(650000)
+            except BlockingIOError:
+                QtCore.QThread.msleep(1)
                 continue
             except Exception as e:
-                print(f"[Receiver] Error receiving data: {e}")
+                print(f"[Receiver] Socket error: {e}")
                 break
+
+            if not data:
+                continue
+
+            try:
+                line = data.decode("utf-8").strip()
+
+                if line.startswith("M"):
+                    QtCore.QMetaObject.invokeMethod(self.parent(), "trigger_matrix_mode", QtCore.Qt.QueuedConnection)
+
+                elif line.startswith("V"):
+                    data = json.loads(line[1:])
+                    point = np.array([float(data["x"]), float(data["y"]), float(data["z"])])
+                    self.peg_point_received.emit(point)
+                    self.validation_gaze_received.emit(
+                        np.array(data.get("gaze_line")),
+                        float(data.get("roi", 0.0)),
+                        int(data.get("intercept", 0)),
+                        float(data.get("gaze_distance", 0.0))
+                    )
+
+                elif line.startswith("G"):
+                    data = json.loads(line[1:])
+                    self.full_gaze_received.emit(
+                        np.array(data.get("gaze_line")),
+                        float(data.get("roi", 0.0)),
+                        int(data.get("intercept", 0)),
+                        float(data.get("gaze_distance", 0.0)),
+                        np.array(data.get("pegs", []))
+                    )
+
+                else:
+                    raw = json.loads(line)
+                    camera_points = [np.array(v[0]) for v in raw.values()]
+                    holo_points = [np.array(v[1]) for v in raw.values()]
+                    self.updated_points.emit(camera_points, holo_points)
+
+            except Exception as e:
+                print(f"[Receiver] Failed to process message: {e}")
+
+        print("[Receiver] Shutting down cleanly.")
 
 
 class MatrixInfoWindow(QtWidgets.QWidget):
@@ -158,12 +247,13 @@ class MatrixInfoWindow(QtWidgets.QWidget):
 
 
 class GazeTrackingWindow(QtWidgets.QWidget):
-    def __init__(self, transform_matrices=None, parent=None):
+    def __init__(self, transform_matrices=None, enable_receiver=True, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Gaze Tracking")
-        self.setMinimumSize(600, 400)
+        self.setMinimumSize(800, 600)
 
         # === Core Attributes ===
+        self.recorder = Recorder()
         self.transform_matrices = transform_matrices or []
         self.latest_gaze_line = None
         self.latest_roi = 0.0
@@ -171,6 +261,12 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         self.latest_pegs = []
         self.latest_gaze_distance = 0.0
         self.fix_view_actors = []
+
+        self.receiver = None
+        if enable_receiver:
+            self.receiver = DataReceiver(parent=self)
+            self.receiver.full_gaze_received.connect(self.update_gaze_data)
+            self.receiver.start()
 
         # === Plotter ===
         self.plotter = QtInteractor(self)
@@ -221,6 +317,11 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         self.matrix_group = QtWidgets.QButtonGroup()
         self.matrix_buttons = []
 
+         # === Load Matrices Button ===
+        self.load_matrices_button = QtWidgets.QPushButton("Load Matrices")
+        self.load_matrices_button.clicked.connect(self.load_matrices_from_file)
+        transform_layout.addWidget(self.load_matrices_button)
+
         for i, label in enumerate(MATRIX_BUTTON_LABELS):
             btn = QtWidgets.QRadioButton(label)
             self.matrix_group.addButton(btn, i)
@@ -261,6 +362,16 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         right_panel.addWidget(view_group)
         right_panel.addWidget(self.gaze_distance_label)
         right_panel.addStretch()
+
+        # === Recording Controls ===
+        self.start_recording_button = QtWidgets.QPushButton("Start Recording")
+        self.stop_recording_button = QtWidgets.QPushButton("Stop & Save Recording")
+
+        right_panel.addWidget(self.start_recording_button)
+        right_panel.addWidget(self.stop_recording_button)
+
+        self.start_recording_button.clicked.connect(self.recorder.start)
+        self.stop_recording_button.clicked.connect(self._save_recording)
 
         # === Layouts ===
         viewer_layout = QtWidgets.QVBoxLayout()
@@ -321,6 +432,19 @@ class GazeTrackingWindow(QtWidgets.QWidget):
             self.latest_intercept = intercept
             self.latest_gaze_distance = gaze_distance
             self.latest_pegs = np.array(pegs)
+
+            if self.recorder.recording:
+                try:
+                    gaze_dict = {
+                        "gaze_line": self.latest_gaze_line.tolist(),
+                        "roi": self.latest_roi,
+                        "intercept": self.latest_intercept,
+                        "gaze_distance": self.latest_gaze_distance
+                    }
+                    peg_list = self.latest_pegs.tolist() if isinstance(self.latest_pegs, np.ndarray) else self.latest_pegs
+                    self.recorder.log_frame(gaze_dict, peg_list, self.matrix_group.checkedId())
+                except Exception as e:
+                    print(f"[GazeTracking] Error logging frame: {e}")
 
             self.gaze_distance_label.setText(f"Gaze Distance: {gaze_distance:.2f} mm")
             self._update_gaze_line()
@@ -420,6 +544,22 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         print(f"[GazeTracking] Peg of interest set to: {index}")
         self._update_gaze_line()
 
+    def load_matrices_from_file(self):
+        path = "Assets/Scripts/GUI/transform_data.txt"
+
+        if not path:  # User cancelled or didn't choose anything
+            QtWidgets.QMessageBox.warning(self, "Load Failed", "No file selected.")
+            return
+
+        try:
+            result = load_transform_matrices_from_file(path)
+            self.transform_matrices = result["matrices"]
+            QtWidgets.QMessageBox.information(self, "Matrices Loaded", "Successfully loaded matrices.")
+            self._update_gaze_line()
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Load Failed", str(e))
+            print(f"[GazeTracking] Failed to load matrices: {e}")
+
     def reset_view(self):
         self.plotter.view_isometric()
         self.plotter.reset_camera()
@@ -478,12 +618,24 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         if self.current_gaze_data:
             self.update_gaze_visual(self.current_gaze_data)
 
+    def _save_recording(self):
+        self.recorder.stop()
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Recording", "", "JSON Files (*.json)")
+        if path:
+            self.recorder.save(path)
+
+    def closeEvent(self, event):
+        if self.receiver:
+            self.receiver.stop()
+            self.receiver.wait()
+        super().closeEvent(event)
+
 
 class MainWindow(QtWidgets.QWidget):
     """Main application window."""
     trigger_matrix_mode = QtCore.pyqtSignal()
     
-    def __init__(self):
+    def __init__(self, enable_receiver=True):
         super().__init__()
         self.setWindowTitle("Real-Time Point Viewer")
         self.trigger_matrix_mode.connect(self.handle_matrix_mode)
@@ -498,6 +650,15 @@ class MainWindow(QtWidgets.QWidget):
         self.peg_validation_actor = None
         self.transform_matrices = []
         self.fix_view_actors = []
+        self.receiver = None
+
+        if enable_receiver:
+            self.receiver = DataReceiver(parent=self)
+            self.receiver.updated_points.connect(self.set_all_pairs)
+            self.receiver.peg_point_received.connect(self.set_peg_validation_point)
+            self.receiver.validation_gaze_received.connect(self.update_validation_gaze)
+            self.receiver.full_gaze_received.connect(self.receive_gaze_data)
+            self.receiver.start()
 
         # UI setup
         self.plotter = QtInteractor(self)
@@ -609,8 +770,6 @@ class MainWindow(QtWidgets.QWidget):
         right_layout.addWidget(transform_group)
         right_layout.addWidget(view_group)
         right_layout.addStretch()
-        self.launch_gaze_button = QtWidgets.QPushButton("Launch Gaze Tracking")
-        gaze_layout.addWidget(self.launch_gaze_button)
         gaze_group.setLayout(gaze_layout)
         right_layout.addWidget(gaze_group)
         right_layout.addWidget(self.gaze_distance_label)
@@ -629,16 +788,11 @@ class MainWindow(QtWidgets.QWidget):
         self.clear_transform_button.clicked.connect(self.clear_transform_points)
         self.matrix_apply_button.clicked.connect(self.apply_matrix_transform)
         self.fix_view_checkbox.stateChanged.connect(self.update_scene)
-        self.launch_gaze_button.clicked.connect(self.open_gaze_tracking)
-
-        self.receiver = DataReceiver(parent=self)
-        self.receiver.updated_points.connect(self.set_all_pairs)
-        self.receiver.peg_point_received.connect(self.set_peg_validation_point)
-        self.receiver.start()
 
     def closeEvent(self, event):
-        self.receiver.stop()
-        self.receiver.wait()
+        if self.receiver:
+            self.receiver.stop()
+            self.receiver.wait()
         super().closeEvent(event)
 
     @QtCore.pyqtSlot(list, list)
@@ -845,58 +999,19 @@ class MainWindow(QtWidgets.QWidget):
     def handle_matrix_mode(self):
         matrix_path = "Assets/Scripts/GUI/transform_data.txt"
         try:
-            with open(matrix_path, "r") as f:
-                matrix_json =json.load(f)
-            required_keys = [
-                "similarity_transform", "affine_transform", 
-                "similarity_transform_ransac", "affine_transform_ransac"
-                ]
-            self.transform_matrices = []
-            for key in required_keys:
-                if key not in matrix_json:
-                    raise ValueError(f"Missing required key: {key}")
-                matrix_data = matrix_json[key]
-                matrix = np.array(matrix_data).reshape(4, 4)
-                self.transform_matrices.append(matrix)
+            result = load_transform_matrices_from_file(matrix_path)
+            self.transform_matrices = result["matrices"]
 
-            rmse_values = matrix_json.get("rmse", [0, 0, 0, 0])
-            repro_values = matrix_json.get("repro", [0, 0, 0, 0])
-            row_dict = matrix_json.get("rows", {})
-            num_rows = len(row_dict.get("Camera", []))
-            print(f"[MainWindow] Number of rows in data: {len(row_dict)}")
-            point_rows = []
-            for i in range(num_rows):
-                row = [
-                    row_dict["Camera"][i],
-                    row_dict["Hololens"][i],
-                    row_dict["similarity_transformed_B"][i],
-                    row_dict["similarity_transform_errors"][i],
-                    row_dict["affine_transformed_B"][i],
-                    row_dict["affine_transform_errors"][i],
-                    row_dict["similarity_transformed_ransac_B"][i],
-                    row_dict["similarity_transform_ransac_errors"][i],
-                    row_dict["similarity_transform_ransac_mask"][i],
-                    row_dict["affine_transformed_ransac_B"][i],
-                    row_dict["affine_transform_ransac_errors"][i],
-                    row_dict["affine_transform_ransac_mask"][i]
-                ]
-                point_rows.append(row)
+            if result["camera_points"] and result["hololens_points"]:
+                self.set_all_pairs(result["camera_points"], result["hololens_points"])
 
-            if "Camera" in row_dict and "Hololens" in row_dict:
-                try:
-                    camera_points = [np.array(p) for p in row_dict["Camera"]]
-                    hololens_points = [np.array(p) for p in row_dict["Hololens"]]
-                    if len(camera_points) == len(hololens_points):
-                        self.set_all_pairs(camera_points, hololens_points)
-                        print(f"[MainWindow] Loaded {len(camera_points)} Camera/Hololens point pairs from matrix file.")
-                    else:
-                        print("[MainWindow] Warning: 'Camera' and 'Hololens' arrays are unequal in length.")
-                except Exception as e:
-                    print(f"[MainWindow] Failed to parse Camera/Hololens point arrays: {e}")
-
-            self.matrix_info_window = MatrixInfoWindow(self.transform_matrices, point_rows, rmse_values, repro_values)
+            self.matrix_info_window = MatrixInfoWindow(
+                self.transform_matrices,
+                result["rows"],
+                result["rmse"],
+                result["repro"]
+            )
             self.matrix_info_window.show()
-
             print("[MainWindow] Transform matrices loaded successfully.")
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Matrix Load Failed", str(e))
@@ -948,18 +1063,37 @@ class MainWindow(QtWidgets.QWidget):
         self.update_scene()
 
     def load_matrices_from_file(self):
-        self.handle_matrix_mode()
+        path = "Assets/Scripts/GUI/transform_data.txt"
+
+        if not path:
+            QtWidgets.QMessageBox.warning(self, "Load Failed", "No file selected.")
+            return
+
+        try:
+            result = load_transform_matrices_from_file(path)
+            self.transform_matrices = result["matrices"]
+
+            if result["camera_points"] and result["hololens_points"]:
+                self.set_all_pairs(result["camera_points"], result["hololens_points"])
+
+            self.matrix_info_window = MatrixInfoWindow(
+                self.transform_matrices,
+                result["rows"],
+                result["rmse"],
+                result["repro"]
+            )
+            self.matrix_info_window.show()
+
+            QtWidgets.QMessageBox.information(self, "Matrices Loaded", "Successfully loaded matrices.")
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Load Failed", str(e))
+            print(f"[MainWindow] Failed to load matrices: {e}")
 
     def _zoom(self, factor: float):
         camera = self.plotter.camera
         if hasattr(camera, "Zoom"):
             camera.Zoom(factor)
         self.plotter.render()
-
-    def open_gaze_tracking(self):
-        print("[MainWindow] Launching gaze tracking window...")
-        self.gaze_window = GazeTrackingWindow(transform_matrices=self.transform_matrices)
-        self.gaze_window.show()
 
     def draw_dashed_line(self, p1, p2, segments=30):
         points = np.linspace(p1, p2, segments * 2).reshape(-1, 2, 3)
@@ -1057,9 +1191,56 @@ class MainWindow(QtWidgets.QWidget):
         self.plotter.render()
 
 
+class MainMenuWindow(QtWidgets.QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Mixed Reality Surgical Training System")
+        self.setMinimumSize(400, 300)
+
+        layout = QtWidgets.QVBoxLayout()
+
+        # Info Label
+        info_label = QtWidgets.QLabel(
+            "<h2>Welcome to the Surgical Training GUI</h2>"
+            "<p>Select a mode to begin:</p>"
+        )
+        info_label.setAlignment(QtCore.Qt.AlignCenter)
+
+        # Buttons
+        calibration_btn = QtWidgets.QPushButton("Calibration / Validation Mode")
+        gaze_tracking_btn = QtWidgets.QPushButton("Gaze Tracking Mode")
+        playback_btn = QtWidgets.QPushButton("Playback Mode")
+
+        calibration_btn.clicked.connect(self.launch_calibration)
+        gaze_tracking_btn.clicked.connect(self.launch_gaze_tracking)
+        playback_btn.clicked.connect(self.launch_playback)
+
+        layout.addWidget(info_label)
+        layout.addStretch()
+        layout.addWidget(calibration_btn)
+        layout.addWidget(gaze_tracking_btn)
+        layout.addWidget(playback_btn)
+        layout.addStretch()
+
+        self.setLayout(layout)
+
+    def launch_calibration(self):
+        self.calibration_window = MainWindow()
+        self.calibration_window.show()
+
+    def launch_gaze_tracking(self):
+        self.gaze_window = GazeTrackingWindow(enable_receiver=True)
+        self.gaze_window.show()
+
+    def launch_playback(self):
+        QtWidgets.QMessageBox.information(
+            self, "Playback Mode", "Playback window not implemented yet."
+        )
+
+
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
-    window = MainWindow()
-    window.resize(800, 600)
-    window.show()
+    main_menu = MainMenuWindow()
+    main_menu.resize(500, 400)
+    main_menu.show()
     sys.exit(app.exec_())
