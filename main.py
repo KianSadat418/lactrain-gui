@@ -639,6 +639,7 @@ class PlaybackWindow(QtWidgets.QWidget):
 
         # === Core Data and Playback State ===
         self.frames = []
+        self.fixation_points = []
         self.current_index = 0
         self.is_playing = False
 
@@ -662,7 +663,9 @@ class PlaybackWindow(QtWidgets.QWidget):
         self.fix_view_checkbox.setChecked(False)
 
         # === Analysis Buttons (stubs for now) ===
-        self.heatmap_button = QtWidgets.QPushButton("Toggle Heatmap (TODO)")
+        self.heatmap_button = QtWidgets.QPushButton("Show Heatmap")
+        self.heatmap_button.clicked.connect(self.generate_heatmap)
+
         self.trajectory_checkbox = QtWidgets.QCheckBox("Show Peg Trajectories")
         self.trajectory_checkbox.setChecked(False)
 
@@ -754,6 +757,11 @@ class PlaybackWindow(QtWidgets.QWidget):
             self.current_index = idx
 
         frame = self.frames[idx]
+        # Track fixation points only if intercept is true
+        if frame["gaze_data"]["intercept"] == 1:
+            end_point = np.array(frame["gaze_data"]["gaze_line"][1])  # Point B
+            self.fixation_points.append(end_point)
+
         gaze_line = np.array(frame["gaze_data"]["gaze_line"])
         roi = frame["gaze_data"]["roi"]
         intercept = frame["gaze_data"]["intercept"]
@@ -805,6 +813,39 @@ class PlaybackWindow(QtWidgets.QWidget):
                 self.plotter.add_mesh(line, color="blue", line_width=3)
 
         self.plotter.render()
+
+    def generate_heatmap(self):
+        if not self.fixation_points:
+            QtWidgets.QMessageBox.information(self, "No Data", "No fixation points recorded.")
+            return
+
+        import matplotlib.pyplot as plt
+        from scipy.stats import gaussian_kde
+        import os
+
+        points = np.array(self.fixation_points)
+        x = points[:, 0]
+        y = points[:, 1]  # Or use z instead of y depending on view plane
+
+        # Kernel density estimate for smooth heatmap
+        xy = np.vstack([x, y])
+        kde = gaussian_kde(xy)
+        xi, yi = np.mgrid[x.min():x.max():500j, y.min():y.max():500j]
+        zi = kde(np.vstack([xi.flatten(), yi.flatten()]))
+
+        plt.figure(figsize=(8, 6))
+        plt.title("Gaze Fixation Heatmap")
+        plt.pcolormesh(xi, yi, zi.reshape(xi.shape), shading="auto", cmap="hot")
+        plt.colorbar(label="Fixation Density")
+        plt.xlabel("X")
+        plt.ylabel("Y")
+        plt.tight_layout()
+
+        save_path = "fixation_heatmap.png"
+        plt.savefig(save_path)
+        plt.show()
+
+        print(f"[Heatmap] Heatmap saved to {os.path.abspath(save_path)}")
 
     def reset_view(self):
         self.plotter.view_isometric()
