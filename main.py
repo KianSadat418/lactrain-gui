@@ -748,7 +748,7 @@ class PlaybackWindow(QtWidgets.QWidget):
         self.setLayout(container_layout)
 
         # === Final Setup ===
-        self.trajectory_checkbox.stateChanged.connect(lambda _: self.update_frame(self.current_index))
+        self.trajectory_checkbox.stateChanged.connect(lambda _: self.update_frame(self.current_index if self.frames else None))
         self.reset_button.clicked.connect(self.reset_view)
         self.zoom_in_button.clicked.connect(lambda: self._zoom(1.2))
         self.zoom_out_button.clicked.connect(lambda: self._zoom(0.8))
@@ -773,10 +773,9 @@ class PlaybackWindow(QtWidgets.QWidget):
     def update_frame(self, idx=None):
         if not self.frames:
             return
-        if idx is None:
-            idx = self.current_index
-        else:
-            self.current_index = idx
+        if idx is None or not (0 <= idx < len(self.frames)):
+            idx = 0
+        self.current_index = idx
 
         frame = self.frames[idx]
         # Track fixation points only if intercept is true
