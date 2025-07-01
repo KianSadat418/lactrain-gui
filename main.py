@@ -998,8 +998,6 @@ class MainWindow(QtWidgets.QWidget):
         options_layout.addWidget(self.cam_checkbox)
         options_layout.addWidget(self.holo_checkbox)
         options_group.setLayout(options_layout)
-        gaze_group = QtWidgets.QGroupBox("Gaze Tracking")
-        gaze_layout = QtWidgets.QVBoxLayout()
 
         # Transform configuration
         transform_group = QtWidgets.QGroupBox("Transform")
@@ -1056,8 +1054,6 @@ class MainWindow(QtWidgets.QWidget):
         right_layout.addWidget(transform_group)
         right_layout.addWidget(view_group)
         right_layout.addStretch()
-        gaze_group.setLayout(gaze_layout)
-        right_layout.addWidget(gaze_group)
         right_layout.addWidget(self.gaze_distance_label)
 
         layout = QtWidgets.QHBoxLayout(self)
