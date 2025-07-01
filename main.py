@@ -271,9 +271,10 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         # === Plotter ===
         self.plotter = QtInteractor(self)
 
-        # Original Peg Mesh (all 6)
+        # Original Peg Mesh (hidden)
         self.peg_mesh = pv.PolyData(np.zeros((6, 3)))
         self.peg_mesh_actor = self.plotter.add_mesh(self.peg_mesh, color="purple", point_size=12, render_points_as_spheres=True)
+        self.peg_mesh_actor.SetVisibility(False)
 
         # Transformed Peg Mesh (all 6)
         self.transformed_peg_mesh = pv.PolyData(np.zeros((6, 3)))
@@ -367,10 +368,16 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         self.start_recording_button = QtWidgets.QPushButton("Start Recording")
         self.stop_recording_button = QtWidgets.QPushButton("Stop & Save Recording")
 
+        # Recording indicator
+        self.record_indicator = QtWidgets.QLabel("● REC")
+        self.record_indicator.setStyleSheet("color: red; font-weight: bold;")
+        self.record_indicator.hide()
+
         right_panel.addWidget(self.start_recording_button)
         right_panel.addWidget(self.stop_recording_button)
+        right_panel.addWidget(self.record_indicator)
 
-        self.start_recording_button.clicked.connect(self.recorder.start)
+        self.start_recording_button.clicked.connect(self._start_recording)
         self.stop_recording_button.clicked.connect(self._save_recording)
 
         # === Layouts ===
@@ -399,6 +406,11 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         self.render_timer.setInterval(100)  # 10 FPS
         self.render_timer.timeout.connect(self.plotter.render)
         self.render_timer.start()
+
+        # Timer used to log frames while recording
+        self.record_timer = QtCore.QTimer()
+        self.record_timer.setInterval(100)
+        self.record_timer.timeout.connect(self._log_current_frame)
 
 
     @QtCore.pyqtSlot(object, float, int, float, object)
@@ -432,19 +444,6 @@ class GazeTrackingWindow(QtWidgets.QWidget):
             self.latest_intercept = intercept
             self.latest_gaze_distance = gaze_distance
             self.latest_pegs = np.array(pegs)
-
-            if self.recorder.recording:
-                try:
-                    gaze_dict = {
-                        "gaze_line": self.latest_gaze_line.tolist(),
-                        "roi": self.latest_roi,
-                        "intercept": self.latest_intercept,
-                        "gaze_distance": self.latest_gaze_distance
-                    }
-                    peg_list = self.latest_pegs.tolist() if isinstance(self.latest_pegs, np.ndarray) else self.latest_pegs
-                    self.recorder.log_frame(gaze_dict, peg_list, self.matrix_group.checkedId())
-                except Exception as e:
-                    print(f"[GazeTracking] Error logging frame: {e}")
 
             self.gaze_distance_label.setText(f"Gaze Distance: {gaze_distance:.2f} mm")
             self._update_gaze_line()
@@ -494,13 +493,9 @@ class GazeTrackingWindow(QtWidgets.QWidget):
             self.cone_mesh = cone
             self.cone_actor = self.plotter.add_mesh(self.cone_mesh, color=cone_color, opacity=0.3)
 
-        # === 4. Original Pegs (all 6) ===
         pegs = np.array(self.latest_pegs)
-        if pegs.shape == (6, 3):
-            self.peg_mesh.deep_copy(pv.PolyData(pegs))
-            self.peg_mesh.Modified()
 
-        # === 5. Transformed Pegs (all 6) ===
+        # === 4. Transformed Pegs (all 6) ===
         idx = self.matrix_group.checkedId()
         if 0 <= idx < len(self.transform_matrices) and pegs.shape == (6, 3):
             matrix = self.transform_matrices[idx]
@@ -509,7 +504,7 @@ class GazeTrackingWindow(QtWidgets.QWidget):
             self.transformed_peg_mesh.deep_copy(pv.PolyData(transformed_pegs))
             self.transformed_peg_mesh.Modified()
 
-            # === 6. ROI Sphere + Animated Line (for first peg only) ===
+            # === 5. ROI Sphere + Animated Line (peg of interest) ===
             peg = transformed_pegs[self.peg_of_interest_index] # peg of interest
             if hasattr(self, "roi_sphere_mesh"):
                 sphere = pv.Sphere(radius=self.latest_roi, center=peg)
@@ -620,9 +615,34 @@ class GazeTrackingWindow(QtWidgets.QWidget):
 
     def _save_recording(self):
         self.recorder.stop()
+        self.record_timer.stop()
+        self.record_indicator.hide()
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Recording", "", "JSON Files (*.json)")
         if path:
             self.recorder.save(path)
+
+    def _start_recording(self):
+        self.recorder.start()
+        self.record_indicator.show()
+        self.record_timer.start()
+
+    def _log_current_frame(self):
+        if not self.recorder.recording:
+            return
+        if self.latest_gaze_line is None:
+            return
+        gaze_dict = {
+            "gaze_line": self.latest_gaze_line.tolist(),
+            "roi": self.latest_roi,
+            "intercept": self.latest_intercept,
+            "gaze_distance": self.latest_gaze_distance,
+        }
+        peg_list = (
+            self.latest_pegs.tolist()
+            if isinstance(self.latest_pegs, np.ndarray)
+            else self.latest_pegs
+        )
+        self.recorder.log_frame(gaze_dict, peg_list, self.matrix_group.checkedId())
 
     def closeEvent(self, event):
         if self.receiver:
