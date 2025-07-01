@@ -271,10 +271,8 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         # === Plotter ===
         self.plotter = QtInteractor(self)
 
-        # Original Peg Mesh (hidden)
-        self.peg_mesh = pv.PolyData(np.zeros((6, 3)))
-        self.peg_mesh_actor = self.plotter.add_mesh(self.peg_mesh, color="purple", point_size=12, render_points_as_spheres=True)
-        self.peg_mesh_actor.SetVisibility(False)
+        # Original Peg Mesh was previously used for camera-space pegs. We no
+        # longer display it, so it is omitted entirely.
 
         # Transformed Peg Mesh (all 6)
         self.transformed_peg_mesh = pv.PolyData(np.zeros((6, 3)))
@@ -425,25 +423,33 @@ class GazeTrackingWindow(QtWidgets.QWidget):
             direction = gaze_arr[1]
             length = np.linalg.norm(direction)
 
+            # === Transform incoming peg coordinates ===
+            peg_arr = np.array(pegs)
+            transformed_pegs = peg_arr
+            if peg_arr.shape == (6, 3):
+                idx = self.matrix_group.checkedId()
+                if 0 <= idx < len(self.transform_matrices):
+                    matrix = self.transform_matrices[idx]
+                    transformed_pegs = np.array(
+                        [(matrix @ np.append(p, 1.0))[:3] for p in peg_arr]
+                    )
+            else:
+                print(f"[GazeTracking] Invalid peg shape: {peg_arr.shape}")
+
+            # === Determine dynamic line length using first transformed peg ===
             if length == 0:
                 target = origin
             else:
-                # Approximate dynamic line length using distance to transformed first peg
                 gaze_length = GAZE_LINE_LENGTH
-                if hasattr(self, "latest_pegs") and len(self.latest_pegs) > 0:
-                    idx = self.matrix_group.checkedId()
-                    if 0 <= idx < len(self.transform_matrices):
-                        pt_h = np.append(self.latest_pegs[0], 1.0)
-                        transformed = (self.transform_matrices[idx] @ pt_h)[:3]
-                        gaze_length = np.linalg.norm(transformed)
-
+                if transformed_pegs.shape == (6, 3):
+                    gaze_length = np.linalg.norm(transformed_pegs[0])
                 target = origin + (direction / length) * gaze_length
 
             self.latest_gaze_line = np.array([origin, target])
             self.latest_roi = roi
             self.latest_intercept = intercept
             self.latest_gaze_distance = gaze_distance
-            self.latest_pegs = np.array(pegs)
+            self.latest_pegs = transformed_pegs
 
             self.gaze_distance_label.setText(f"Gaze Distance: {gaze_distance:.2f} mm")
             self._update_gaze_line()
@@ -495,17 +501,13 @@ class GazeTrackingWindow(QtWidgets.QWidget):
 
         pegs = np.array(self.latest_pegs)
 
-        # === 4. Transformed Pegs (all 6) ===
-        idx = self.matrix_group.checkedId()
-        if 0 <= idx < len(self.transform_matrices) and pegs.shape == (6, 3):
-            matrix = self.transform_matrices[idx]
-            transformed_pegs = np.array([(matrix @ np.append(p, 1.0))[:3] for p in pegs])
-
-            self.transformed_peg_mesh.deep_copy(pv.PolyData(transformed_pegs))
+        # === 4. Display Transformed Pegs ===
+        if pegs.shape == (6, 3):
+            self.transformed_peg_mesh.deep_copy(pv.PolyData(pegs))
             self.transformed_peg_mesh.Modified()
 
             # === 5. ROI Sphere + Animated Line (peg of interest) ===
-            peg = transformed_pegs[self.peg_of_interest_index] # peg of interest
+            peg = pegs[self.peg_of_interest_index]
             if hasattr(self, "roi_sphere_mesh"):
                 sphere = pv.Sphere(radius=self.latest_roi, center=peg)
                 self.roi_sphere_mesh.deep_copy(sphere)
