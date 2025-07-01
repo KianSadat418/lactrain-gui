@@ -479,7 +479,7 @@ class GazeTrackingWindow(QtWidgets.QWidget):
             self.disc_mesh.Modified()
         else:
             self.disc_mesh = disc
-            self.disc_actor = self.plotter.add_mesh(self.disc_mesh, color="yellow", opacity=0.5)
+            self.disc_actor = self.plotter.add_mesh(self.disc_mesh, color="cyan", opacity=0.5)
 
         # === 3. Cone from Origin ===
         cone_color = "green" if self.latest_intercept else "red"
@@ -797,17 +797,18 @@ class PlaybackWindow(QtWidgets.QWidget):
 
         # Disc
         direction = B - A
+        height = float(np.linalg.norm(direction))
         norm_direction = direction / np.linalg.norm(direction)
         self.plotter.add_mesh(
             pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction),
-            color="yellow", opacity=0.5
+            color="cyan", opacity=0.5
         )
 
         # Cone
-        center = A + 0.5 * direction
+        cone_center = A + 0.5 * (B - A)
         color = "green" if intercept else "red"
         self.plotter.add_mesh(
-            pv.Cone(center=center, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS),
+            pv.Cone(center=cone_center, direction=-norm_direction, height=height, radius=DISC_RADIUS),
             color=color, opacity=0.3
         )
 
@@ -1156,6 +1157,7 @@ class MainWindow(QtWidgets.QWidget):
         roi = float(self.latest_validation_roi)
         direction = B - A
         length = np.linalg.norm(direction)
+        height = float(length)
         if length == 0:
             return
         norm_direction = direction / length
@@ -1185,7 +1187,7 @@ class MainWindow(QtWidgets.QWidget):
         # === 3. Cone from origin to disc ===
         cone_color = "green" if self.latest_validation_intercept else "red"
 
-        cone = pv.Cone(center=cone_center, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS)
+        cone = pv.Cone(center=cone_center, direction=-norm_direction, height=height, radius=DISC_RADIUS)
         if hasattr(self, "validation_cone_mesh"):
             self.validation_cone_mesh.deep_copy(cone)
             self.validation_cone_mesh.Modified()
