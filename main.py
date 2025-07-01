@@ -443,7 +443,11 @@ class GazeTrackingWindow(QtWidgets.QWidget):
             self.latest_roi = roi
             self.latest_intercept = intercept
             self.latest_gaze_distance = gaze_distance
-            self.latest_pegs = np.array(pegs)
+            peg_arr = np.array(pegs).reshape(-1, 3)
+            self.latest_pegs = peg_arr
+            self.peg_mesh.points = peg_arr
+            self.peg_mesh.Modified()
+            self.peg_mesh_actor.SetVisibility(True)
 
             self.gaze_distance_label.setText(f"Gaze Distance: {gaze_distance:.2f} mm")
             self._update_gaze_line()
@@ -493,11 +497,11 @@ class GazeTrackingWindow(QtWidgets.QWidget):
             self.cone_mesh = cone
             self.cone_actor = self.plotter.add_mesh(self.cone_mesh, color=cone_color, opacity=0.3)
 
-        pegs = np.array(self.latest_pegs)
+        pegs = np.array(self.latest_pegs).reshape(-1, 3)
 
         # === 4. Transformed Pegs (all 6) ===
         idx = self.matrix_group.checkedId()
-        if 0 <= idx < len(self.transform_matrices) and pegs.shape == (6, 3):
+        if 0 <= idx < len(self.transform_matrices) and pegs.size >= 3:
             matrix = self.transform_matrices[idx]
             transformed_pegs = np.array([(matrix @ np.append(p, 1.0))[:3] for p in pegs])
 
@@ -665,15 +669,36 @@ class PlaybackWindow(QtWidgets.QWidget):
 
         # === PyVista Plotter ===
         self.plotter = QtInteractor(self)
-        self.gaze_line_actor = None
-        self.disc_actor = None
-        self.cone_actor = None
-        self.peg_actor = None
+        self.gaze_line_mesh = pv.Line([0, 0, 0], [0, 0, 0])
+        self.gaze_line_actor = self.plotter.add_mesh(
+            self.gaze_line_mesh, color="green", line_width=3
+        )
+
+        self.disc_mesh = pv.Disc(center=[0, 0, 0], inner=0.0, outer=DISC_RADIUS)
+        self.disc_actor = self.plotter.add_mesh(
+            self.disc_mesh, color="yellow", opacity=0.5
+        )
+
+        self.cone_mesh = pv.Cone(direction=[0, 0, 1], height=GAZE_LINE_LENGTH,
+                                 radius=DISC_RADIUS)
+        self.cone_actor = self.plotter.add_mesh(
+            self.cone_mesh, color="red", opacity=0.3
+        )
+
+        self.peg_mesh = pv.PolyData(np.zeros((6, 3)))
+        self.peg_actor = self.plotter.add_mesh(
+            self.peg_mesh,
+            color="purple",
+            point_size=12,
+            render_points_as_spheres=True,
+        )
 
         # === Timer for Playback ===
         self.timer = QtCore.QTimer()
         self.timer.setInterval(100)  # 100 ms = 10 FPS
         self.timer.timeout.connect(self.advance_frame)
+
+        self.trajectory_actors = []
 
         # === Viewer Controls ===
         self.reset_button = QtWidgets.QPushButton("Reset View")
@@ -788,53 +813,58 @@ class PlaybackWindow(QtWidgets.QWidget):
         peg_data = np.array(frame["peg_data"])
 
         A, B = gaze_line
-        self.plotter.clear()
-        self.plotter.show_axes()
-        self.plotter.show_grid()
+        line = pv.Line(A, B)
+        self.gaze_line_mesh.deep_copy(line)
+        self.gaze_line_mesh.Modified()
 
-        # Gaze Line
-        self.plotter.add_mesh(pv.Line(A, B), color="green", line_width=3)
-
-        # Disc
         direction = B - A
         norm_direction = direction / np.linalg.norm(direction)
-        self.plotter.add_mesh(
-            pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction),
-            color="yellow", opacity=0.5
-        )
 
-        # Cone
+        disc = pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction)
+        self.disc_mesh.deep_copy(disc)
+        self.disc_mesh.Modified()
+
         center = A + 0.5 * direction
-        color = "green" if intercept else "red"
-        self.plotter.add_mesh(
-            pv.Cone(center=center, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS),
-            color=color, opacity=0.3
-        )
+        cone = pv.Cone(center=center, direction=-norm_direction, height=GAZE_LINE_LENGTH, radius=DISC_RADIUS)
+        self.cone_mesh.deep_copy(cone)
+        self.cone_mesh.Modified()
+        col = Color("green" if intercept else "red").float_rgb
+        self.cone_actor.GetProperty().SetColor(col)
 
-        # Pegs
-        if peg_data.shape == (6, 3):
-            self.plotter.add_mesh(pv.PolyData(peg_data), color="purple", point_size=12, render_points_as_spheres=True)
+        if peg_data.size >= 3:
+            pegs = peg_data.reshape(-1, 3)
+            self.peg_mesh.points = pegs
+            self.peg_mesh.Modified()
 
         # === Draw peg trajectories if checkbox is checked ===
+        for actor in self.trajectory_actors:
+            self.plotter.remove_actor(actor)
+        self.trajectory_actors = []
         if hasattr(self, "trajectory_checkbox") and self.trajectory_checkbox.isChecked():
             peg_count = len(self.frames[0]["peg_data"])
             peg_trails = [[] for _ in range(peg_count)]
 
-            for frame in self.frames:
-                for i, peg in enumerate(frame["peg_data"]):
+            for fr in self.frames:
+                for i, peg in enumerate(fr["peg_data"]):
                     peg_trails[i].append(peg)
 
-            for i, trail in enumerate(peg_trails):
+            for trail in peg_trails:
                 trail = np.array(trail)
                 if len(trail) < 2:
                     continue
-
                 line = pv.Spline(trail, len(trail) * 10)
-                self.plotter.add_mesh(line, color="blue", line_width=3)
+                actor = self.plotter.add_mesh(line, color="blue", line_width=3)
+                self.trajectory_actors.append(actor)
 
         self.plotter.render()
 
     def generate_heatmap(self):
+        if not self.fixation_points and self.frames:
+            for fr in self.frames:
+                if fr["gaze_data"]["intercept"] == 1:
+                    end_point = np.array(fr["gaze_data"]["gaze_line"][1])
+                    self.fixation_points.append(end_point)
+
         if not self.fixation_points:
             QtWidgets.QMessageBox.information(self, "No Data", "No fixation points recorded.")
             return
