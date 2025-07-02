@@ -327,8 +327,16 @@ class OptimizedPegTracker:
             self.initialization_buffer.clear()
         
         # Create cost matrix based on 3D distance with velocity prediction
-        cost_matrix = np.zeros((6, 6))
+        if len(active_peg_ids) != len(triangulated_3d):
+            print(f"[Warning] Mismatch: {len(active_peg_ids)} active pegs vs {len(triangulated_3d)} detections.")
+            return self.get_current_state()
+
+        cost_matrix = np.zeros((len(active_peg_ids), len(triangulated_3d)))
         predictions = self._predict_positions()
+
+        if cost_matrix.size == 0:
+            print("[Warning] Empty cost matrix — skipping frame.")
+            return self.get_current_state()
         
         for i, peg_id in enumerate(active_peg_ids):
             predicted_pos = predictions.get(peg_id, self.pegs[peg_id]['position_3d'])
