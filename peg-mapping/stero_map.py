@@ -2,19 +2,15 @@ import cv2
 import numpy as np
 import socket
 import os
-os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'  # Enable OpenEXR support in OpenCV
-from torch import le
 from ultralytics import YOLO
 import json
 from scipy.optimize import linear_sum_assignment
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-from typing import Union
 import itertools
 import struct
 from collections import deque
 from scipy.spatial.distance import cdist
 import time
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'  # Enable OpenEXR support in OpenCV
 
 model = YOLO("Assets/Scripts/Peg-Detection-Scripts/Training-05-22/result/content/runs/detect/yolo8_peg_detector/weights/best.pt")
 calib = np.load("Assets/Scripts/Camera Calibration/stereo_camera_calibration2.npz")
@@ -132,7 +128,7 @@ def find_pairs(left_points, right_points):
 
     return best_pairs_left[0], best_pairs_right[0]
 
-def trasform_pegs(pegs):
+def transform_pegs(pegs):
     """Transform 3D points from camera coordinates to world coordinates using the transformation matrix."""
     transformedPegs = []
     for i, (x, y, z) in enumerate(pegs):
@@ -178,11 +174,6 @@ def res_without_rectify(right_frame, left_frame):
 
     return left_frame_peg, right_frame_peg
 
-
-# Add this to your imports
-from collections import deque
-from scipy.spatial.distance import cdist
-import time
 
 class OptimizedPegTracker:
     def __init__(self):
@@ -445,7 +436,7 @@ class OptimizedPegTracker:
                 movement_scores[peg_id] = avg_movement
         
         if movement_scores:
-            moving_peg_id = max(movement_scores, key=movement_scores.get)
+            moving_peg_id = max(movement_scores, key=movement_scores.get) # type: ignore
             if movement_scores[moving_peg_id] > self.movement_threshold:
                 return moving_peg_id
         
@@ -510,7 +501,7 @@ if __name__ == "__main__":
                 for peg_id, peg_data in current_pegs.items():
                     x, y, z = peg_data['position_3d']
                     try:
-                        transformed_pos = trasform_pegs([(x, y, z)])[0]
+                        transformed_pos = transform_pegs([(x, y, z)])[0]
                         message[str(peg_counter)] = {
                             "x": round(transformed_pos[0], 3),
                             "y": round(transformed_pos[1], 3),
@@ -530,7 +521,7 @@ if __name__ == "__main__":
                 # Fallback to direct detection during initialization
                 try:
                     print(len(pegsInCamera), len(current_pegs))
-                    pegsInHololens = trasform_pegs(pegsInCamera)
+                    pegsInHololens = transform_pegs(pegsInCamera)
                     for i, (x, y, z) in enumerate(pegsInHololens):
                         message[str(i+1)] = {
                             "x": round(x, 3),
