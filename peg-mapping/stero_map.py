@@ -488,23 +488,24 @@ class OptimizedPegTracker:
             peg['confidence'] = max(0.3, peg['confidence'] - 0.05)
     
     def get_current_state(self):
-        """Get current state of all pegs"""
-        current_pegs = {}
-        for peg_id, peg in self.pegs.items():
+        state = {}
+        for peg_id in range(6):
+            peg = self.pegs.get(peg_id)
+            if peg is None:
+                continue  # Should not happen, but safe check
+
             if peg['missing_frames'] < self.max_missing_frames:
-                # Calculate recent movement for this peg
-                recent_movements = list(peg['movement_history'])[-10:]  # Last 10 frames
-                avg_recent_movement = np.mean(recent_movements) if recent_movements else 0
-                
-                current_pegs[peg_id] = {
-                    'left_2d': peg['left_2d'],
-                    'right_2d': peg['right_2d'],
-                    'position_3d': peg['position_3d'],
-                    'confidence': peg['confidence'],
-                    'movement_score': avg_recent_movement,
-                    'is_being_moved': avg_recent_movement > self.movement_threshold
-                }
-        return current_pegs
+                pos = peg['position_3d']
+            else:
+                # Predict if missing
+                pos = peg['kf'].predict().tolist()
+
+            state[str(peg_id)] = {
+                "position_3d": pos,
+                "moving": peg['is_moving'],
+                "confidence": peg['confidence']
+            }
+        return state
     
     def get_moving_peg_id(self):
         """Identify which peg is currently being moved"""
