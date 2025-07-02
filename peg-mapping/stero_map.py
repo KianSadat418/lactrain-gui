@@ -3,6 +3,7 @@ import numpy as np
 import socket
 import os
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'  # Enable OpenEXR support in OpenCV
+from torch import le
 from ultralytics import YOLO
 import json
 from scipy.optimize import linear_sum_assignment
@@ -10,16 +11,14 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from typing import Union
 import itertools
-from peg import Peg
-
-plt.ion()  # Enable interactive plotting
-fig = None
-ax = None
-scatter = None
+import struct
+from collections import deque
+from scipy.spatial.distance import cdist
+import time
 
 model = YOLO("Assets/Scripts/Peg-Detection-Scripts/Training-05-22/result/content/runs/detect/yolo8_peg_detector/weights/best.pt")
 calib = np.load("Assets/Scripts/Camera Calibration/stereo_camera_calibration2.npz")
-#transformation_matrix = np.load("Assets/Scripts/Camera Calibration/TransformationMatrix.npz")
+transformation_matrix = np.load("Assets/Scripts/Camera Calibration/TransformationMatrix.npz")["affine_transform_ransac"]
 K1, D1 = calib["cameraMatrixL"], calib["distL"]
 K2, D2 = calib["cameraMatrixR"], calib["distR"]
 R, T = calib["R"], calib["T"]
@@ -30,176 +29,81 @@ image_size = (800, 600)
 
 R1, R2, P1, P2, Q, _, _ = cv2.stereoRectify(K1, D1, K2, D2, image_size, R, T, alpha=0, flags=cv2.CALIB_ZERO_DISPARITY)
 
-map1x, map1y = cv2.initUndistortRectifyMap(K1, D1, R1, P1, image_size, cv2.CV_32FC1)
-map2x, map2y = cv2.initUndistortRectifyMap(K2, D2, R2, P2, image_size, cv2.CV_32FC1)
-
-OUTPUT_PORT = 9991
+UNITY_LEFT_PORT = 9998
+UNITY_RIGHT_PORT = 9999
+OUTPUT_PORT = 9989
 OUTPUT_IP = "127.0.0.1"
 
 output_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+left_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+right_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1600)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 600)
 
-def triangulate_best_peg_matches(
-    left_points, right_points, 
-    K1, D1, R1, P1,
-    K2, D2, R2, P2,
-    z_plane: float = 0.0
-):
-    def get_camera_origin(P):
-        _, _, _, _, _, _, origin = cv2.decomposeProjectionMatrix(P)
-        origin = origin.flatten()
-        return origin[:3] / origin[3] if origin.shape[0] == 4 else origin[:3]
+CHUNK_SIZE = 30000
+count = 0
 
-    def rectify_points(pts, K, D, R, P):
-        pts = np.array(pts, dtype=np.float32).reshape(-1, 1, 2)
-        rectified = cv2.undistortPoints(pts, K, D, R=R, P=P)
-        return rectified.reshape(-1, 2)
+# pegs = {str(i): ([0, 0], [0, 0], [0, 0, 0]) for i in range(1, 7)}
+# isInitialized = False
 
-    def image_point_to_ray(image_pt):
-        x, y = image_pt
-        ray = np.array([x, y, 1.0])
-        return ray / np.linalg.norm(ray)
+def send_frame_left(frame, frame_id=0):
+    _, buffer = cv2.imencode(".jpg", frame)
+    data = buffer.tobytes()
 
-    def triangulate_point(ray1, origin1, ray2, origin2):
-        v1 = ray1
-        v2 = ray2
-        p1 = origin1
-        p2 = origin2
-        A = np.stack([v1, -v2], axis=1)
-        b = p2 - p1
-        t = np.linalg.lstsq(A, b, rcond=None)[0]
-        pt1 = p1 + t[0] * v1
-        pt2 = p2 + t[1] * v2
-        midpoint = (pt1 + pt2) / 2
-        return midpoint
+    total_chunks = (len(data) + CHUNK_SIZE - 1) // CHUNK_SIZE
 
-    def project_to_z_plane(ray, origin, z_plane):
-        if not np.isfinite(ray[2]) or abs(ray[2]) < 1e-6:
-            return np.full(3, np.nan)  # Return [nan, nan, nan] if vertical component is zero
-        t = (z_plane - origin[2]) / ray[2]
-        return origin + t * ray
+    header = struct.pack('!II', frame_id, total_chunks)
+    left_sock.sendto(b'H' + header, (OUTPUT_IP, UNITY_LEFT_PORT))
 
-    def triangulation_error(ray1, origin1, ray2, origin2):
-        cross = np.cross(ray1, ray2)
-        denom = np.linalg.norm(cross)
-        separation = abs(np.dot(origin2 - origin1, cross)) / denom if denom > 1e-6 else 1e6
-        parallel_penalty = 1 / (denom + 1e-6)
-        return separation + 10 * parallel_penalty
+    for i in range(total_chunks):
+        chunk_data = data[i*CHUNK_SIZE:(i+1)*CHUNK_SIZE]
+        chunk_header = struct.pack('!II', frame_id, i)
+        left_sock.sendto(b'D' + chunk_header + chunk_data, (OUTPUT_IP, UNITY_LEFT_PORT))
 
-    # === Rectify points ===
-    left_rect = rectify_points(left_points, K1, D1, R1, P1)
-    right_rect = rectify_points(right_points, K2, D2, R2, P2)
+def send_frame_right(frame, frame_id=0):
+    _, buffer = cv2.imencode(".jpg", frame)
+    data = buffer.tobytes()
 
-    origin1 = get_camera_origin(P1)
-    origin2 = get_camera_origin(P2)
+    total_chunks = (len(data) + CHUNK_SIZE - 1) // CHUNK_SIZE
 
-    cost_matrix = np.zeros((6, 6))
-    triangulated_candidates: list[list[Union[np.ndarray, None]]] = [[None]*6 for _ in range(6)]
+    header = struct.pack('!II', frame_id, total_chunks)
+    right_sock.sendto(b'H' + header, (OUTPUT_IP, UNITY_RIGHT_PORT))
 
-    for i in range(6):
-        ray1 = image_point_to_ray(left_rect[i])
-        for j in range(6):
-            ray2 = image_point_to_ray(right_rect[j])
+    for i in range(total_chunks):
+        chunk_data = data[i*CHUNK_SIZE:(i+1)*CHUNK_SIZE]
+        chunk_header = struct.pack('!II', frame_id, i)
+        right_sock.sendto(b'D' + chunk_header + chunk_data, (OUTPUT_IP, UNITY_RIGHT_PORT))
 
-            point_3d = triangulate_point(ray1, origin1, ray2, origin2)
-            # Force Z-plane constraint
-            point_3d_z0 = project_to_z_plane((point_3d - origin1), origin1, z_plane)
 
-            point_3d_z0 = project_to_z_plane((point_3d - origin1), origin1, z_plane)
-            if not np.all(np.isfinite(point_3d_z0)):
-                cost_matrix[i][j] = 1e6  # Penalize invalid solutions
-            else:
-                triangulated_candidates[i][j] = point_3d_z0
-                cost_matrix[i][j] = triangulation_error(ray1, origin1, ray2, origin2)
+def find_pairs2(left_points, right_points):
+    result_pairs_right = []
+    result_pairs_left = []
+    for i in range(len(left_points)):
+        for j in range(len(right_points)):
+            if right_points[j] in result_pairs_right or left_points[i] in result_pairs_left:
+                continue
 
-    row_ind, col_ind = linear_sum_assignment(cost_matrix)
-    matched_points = [triangulated_candidates[i][j] for i, j in zip(row_ind, col_ind)]
+            left_x = left_points[i]
+            right_x = right_points[j]
+            if abs(left_x[1] - right_x[1]) > 10.0:
+                continue
 
-    return matched_points
+            pointIn3D = find_3D_points([left_x], [right_x])[0]
+            if pointIn3D[2] > 200.0 or pointIn3D[2] < 0.0:
+                continue
 
-def plot_3d_pegs(points_3d, title="Triangulated Pegs"):
-    """
-    Plots a list of 3D points using matplotlib.
+            result_pairs_left.append(left_x)
+            result_pairs_right.append(right_x)
 
-    Args:
-        points_3d: List of 3D (x, y, z) coordinates.
-        title: Title of the plot window.
-    """
-    points_3d = np.array(points_3d)
-
-    # Filter only finite points
-    valid_mask = np.all(np.isfinite(points_3d), axis=1)
-    valid_points = points_3d[valid_mask]
-
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')
-    ax.scatter(valid_points[:, 0], valid_points[:, 1], valid_points[:, 2], c='b', s=60)
-
-    for i, (x, y, z) in enumerate(valid_points):
-        ax.text(x, y, z, f'{i}', fontsize=10, color='red')
-
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")
-    ax.set_title(title)
-    ax.grid(True)
-    ax.view_init(elev=30, azim=45)
-    plt.tight_layout()
-    plt.show()
-
-def init_3d_plot():
-    """Initialize the 3D plot for live peg visualization."""
-    global fig, ax, scatter
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')
-    ax.set_title("Real-Time Triangulated Pegs")
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")
-    ax.grid(True)
-    scatter = ax.scatter([], [], [], c='b', s=60)
-    plt.tight_layout()
-    plt.show(block=False)
-
-def plot_3d_pegs_live(points_3d):
-    """Update the 3D scatter plot with new peg positions."""
-    global fig, ax, scatter
-    if fig is None or ax is None or scatter is None:
-        init_3d_plot()
-
-    points_3d = np.array(points_3d)
-    valid_mask = np.all(np.isfinite(points_3d), axis=1)
-    valid_points = points_3d[valid_mask]
-
-    if valid_points.shape[0] == 0:
-        return
-
-    ax.clear()
-    ax.set_title("Real-Time Triangulated Pegs")
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")
-    ax.grid(True)
-    ax.scatter(valid_points[:, 0], valid_points[:, 1], valid_points[:, 2], c='b', s=60)
-
-    for i, (x, y, z) in enumerate(valid_points):
-        ax.text(x, y, z, f'{i}', fontsize=10, color='red')
-
-    ax.set_xlim((-100, 100))  # Adjust as needed
-    ax.set_ylim((-100, 100))
-    ax.set_zlim((0, 200))
-
-    plt.draw()
-    plt.pause(0.01)
+    return result_pairs_left, result_pairs_right
 
 def find_pairs(left_points, right_points):
-
     all_pairings = [list(zip(left_points, perm)) for perm in itertools.permutations(right_points)]
 
-    best_pair = []
+    best_pairs_left = []
+    best_pairs_right = []
     for j, pairings in enumerate(all_pairings):
         best_pair_found = True
 
@@ -222,11 +126,21 @@ def find_pairs(left_points, right_points):
             
         if not best_pair_found:
             continue
+        
+        best_pairs_left.append(left_x)
+        best_pairs_right.append(right_x)
 
-        best_pair.append(pairings)
-    
+    return best_pairs_left[0], best_pairs_right[0]
 
-    return best_pair
+def trasform_pegs(pegs):
+    """Transform 3D points from camera coordinates to world coordinates using the transformation matrix."""
+    transformedPegs = []
+    for i, (x, y, z) in enumerate(pegs):
+        p = np.array([round(x, 3), round(y, 3), round(z, 3), 1.0])
+        p_transformed = transformation_matrix @ p
+        transformedPegs.append(p_transformed[:3])
+
+    return transformedPegs
 
 def find_3D_points(left_points, right_points):
     points_3D = []
@@ -244,14 +158,14 @@ def find_3D_points(left_points, right_points):
 
 def get_center(results):
     if len(results.boxes) == 0:
-        return None 
+        return []  # Return empty list instead of None
     
     pegs = []
     for box in results.boxes:
-            x1, y1, x2, y2 = box.xyxy[0]
-            x = float((x1 + x2) / 2)
-            y = float((y1 + y2) / 2)
-            pegs.append([x, y])
+        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()  # Add .cpu().numpy()
+        x = float((x1 + x2) / 2)
+        y = float((y1 + y2) / 2)
+        pegs.append([x, y])
 
     return pegs
 
@@ -264,134 +178,390 @@ def res_without_rectify(right_frame, left_frame):
 
     return left_frame_peg, right_frame_peg
 
-# Assign triangulated positions to existing peg objects
-def assign_points_to_pegs(triangulated_points, pegs):
-    if any(not p.initialized for p in pegs):
-        # Random init: assign sorted X-values if any peg is uninitialized
-        sorted_pts = sorted(triangulated_points, key=lambda p: p[0])
-        for peg, pos in zip(pegs, sorted_pts):
-            peg.update(np.array(pos))
-        return
 
-    cost_matrix = np.zeros((6, 6))
-    for i, peg in enumerate(pegs):
-        peg_pos = peg.get_position()
-        for j, new_pt in enumerate(triangulated_points):
-            cost_matrix[i][j] = np.linalg.norm(peg_pos - new_pt)
+# Add this to your imports
+from collections import deque
+from scipy.spatial.distance import cdist
+import time
 
-    row_ind, col_ind = linear_sum_assignment(cost_matrix)
-    # Compute movement deltas
-    deltas = []
-    for i, j in zip(row_ind, col_ind):
-        old_pos = pegs[i].last_position
-        new_pos = triangulated_points[j]
-        if old_pos is None:
-            deltas.append(np.inf)
+class OptimizedPegTracker:
+    def __init__(self):
+        # Adjusted parameters based on your specs
+        self.max_distance_2d = 30  # pixels (considering 60fps, movement should be small between frames)
+        self.max_distance_3d = 40  # mm (5cm/s at 60fps = ~0.8mm per frame, with safety margin)
+        self.max_missing_frames = 8  # 0.5 seconds at 60fps
+        self.initialization_frames = 5  # Require stable detection for initialization
+        
+        self.pegs = {}
+        self.next_peg_id = 0
+        self.frame_count = 0
+        self.is_initialized = False
+        self.initialization_buffer = []
+        
+        # Movement tracking for identifying active peg
+        self.movement_threshold = 5.0  # mm - movement above this suggests user interaction
+        self.movement_history_size = 15  # 0.5 seconds of history
+        
+    def add_initialization_frame(self, left_detections, right_detections, triangulated_3d):
+        """Buffer frames for stable initialization"""
+        if len(left_detections) == 6 and len(right_detections) == 6 and len(triangulated_3d) == 6:
+            self.initialization_buffer.append({
+                'left': left_detections,
+                'right': right_detections,
+                'triangulated': triangulated_3d,
+                'frame': self.frame_count
+            })
+            
+            # Keep only recent frames
+            if len(self.initialization_buffer) > self.initialization_frames:
+                self.initialization_buffer.pop(0)
+                
+            # Check if we can initialize
+            if len(self.initialization_buffer) == self.initialization_frames:
+                self._attempt_initialization()
         else:
-            deltas.append(np.linalg.norm(old_pos - new_pos))
-
-    # Find the peg that moved the most
-    moving_idx = np.argmax(deltas)
-    print(f"[INFO] Peg {moving_idx} is moving (Δ={deltas[moving_idx]:.2f})")
-
-    # Only update the moving peg
-    for i, j in zip(row_ind, col_ind):
-        if i == moving_idx or deltas[i] < 1.0:
-            pegs[i].update(triangulated_points[j])
+            # Clear buffer if we don't have 6 pegs
+            self.initialization_buffer.clear()
+    
+    def _attempt_initialization(self):
+        """Initialize pegs using stable detections from buffer"""
+        if len(self.initialization_buffer) < self.initialization_frames:
+            return
+            
+        # Use the most recent frame for initialization
+        latest_frame = self.initialization_buffer[-1]
+        
+        # Verify stability by checking if pegs haven't moved too much
+        first_frame = self.initialization_buffer[0]
+        
+        stable = True
+        for i in range(6):
+            movement_3d = np.linalg.norm(
+                np.array(latest_frame['triangulated'][i]) - 
+                np.array(first_frame['triangulated'][i])
+            )
+            if movement_3d > 20:  # 2cm movement over initialization period suggests instability
+                stable = False
+                break
+        
+        if stable:
+            # Initialize pegs
+            for i in range(6):
+                peg_id = self.next_peg_id
+                self.pegs[peg_id] = {
+                    'left_2d': latest_frame['left'][i],
+                    'right_2d': latest_frame['right'][i],
+                    'position_3d': latest_frame['triangulated'][i],
+                    'velocity_3d': np.zeros(3),
+                    'last_seen': self.frame_count,
+                    'missing_frames': 0,
+                    'movement_history': deque(maxlen=self.movement_history_size),
+                    'confidence': 1.0,
+                    'total_movement': 0.0
+                }
+                self.next_peg_id += 1
+            
+            self.is_initialized = True
+            self.initialization_buffer.clear()
+            print(f"Pegs initialized successfully with {len(self.pegs)} pegs")
         else:
-            pegs[i].update(None)
+            # Clear buffer and start over
+            self.initialization_buffer.clear()
+    
+    def update_tracks(self, left_detections, right_detections, triangulated_3d):
+        """Main update function"""
+        self.frame_count += 1
+        
+        if not self.is_initialized:
+            self.add_initialization_frame(left_detections, right_detections, triangulated_3d)
+            return self.get_current_state()
+        
+        # Handle different detection scenarios
+        if len(triangulated_3d) == 6:
+            return self._update_with_full_detections(left_detections, right_detections, triangulated_3d)
+        else:
+            return self._update_with_partial_detections(left_detections, right_detections, triangulated_3d)
+    
+    def _update_with_full_detections(self, left_detections, right_detections, triangulated_3d):
+        """Update when we have exactly 6 detections"""
+        active_peg_ids = [pid for pid, peg in self.pegs.items() if peg['missing_frames'] < self.max_missing_frames]
+        
+        if len(active_peg_ids) != 6:
+            # Something went wrong, reinitialize
+            self.is_initialized = False
+            self.initialization_buffer.clear()
+            return self.get_current_state()
+        
+        # Create cost matrix based on 3D distance with velocity prediction
+        cost_matrix = np.zeros((6, 6))
+        predictions = self._predict_positions()
+        
+        for i, peg_id in enumerate(active_peg_ids):
+            predicted_pos = predictions.get(peg_id, self.pegs[peg_id]['position_3d'])
+            for j, detection_3d in enumerate(triangulated_3d):
+                distance_3d = np.linalg.norm(predicted_pos - np.array(detection_3d))
+                
+                # Add 2D distance penalty for additional validation
+                left_dist = np.linalg.norm(np.array(self.pegs[peg_id]['left_2d']) - np.array(left_detections[j]))
+                right_dist = np.linalg.norm(np.array(self.pegs[peg_id]['right_2d']) - np.array(right_detections[j]))
+                
+                # Combined cost with weights
+                cost_matrix[i, j] = distance_3d + 0.1 * (left_dist + right_dist)
+        
+        # Solve assignment problem
+        row_indices, col_indices = linear_sum_assignment(cost_matrix)
+        
+        # Update pegs with assignments
+        for i, j in zip(row_indices, col_indices):
+            peg_id = active_peg_ids[i]
+            if cost_matrix[i, j] < self.max_distance_3d:
+                self._update_peg(peg_id, left_detections[j], right_detections[j], triangulated_3d[j])
+            else:
+                # Assignment too costly, mark as missing
+                self.pegs[peg_id]['missing_frames'] += 1
+        
+        return self.get_current_state()
+    
+    def _update_with_partial_detections(self, left_detections, right_detections, triangulated_3d):
+        """Update when we have partial detections"""
+        active_peg_ids = [pid for pid, peg in self.pegs.items() if peg['missing_frames'] < self.max_missing_frames]
+        predictions = self._predict_positions()
+        
+        # Greedy matching for partial detections
+        matched_pegs = set()
+        used_detections = set()
+        
+        # Sort detections by confidence (distance to predictions)
+        detection_scores = []
+        for i, detection_3d in enumerate(triangulated_3d):
+            best_distance = float('inf')
+            for peg_id in active_peg_ids:
+                if peg_id in matched_pegs:
+                    continue
+                predicted_pos = predictions.get(peg_id, self.pegs[peg_id]['position_3d'])
+                distance = np.linalg.norm(predicted_pos - np.array(detection_3d))
+                best_distance = min(best_distance, distance)
+            detection_scores.append((i, best_distance))
+        
+        # Sort by best distance (most confident matches first)
+        detection_scores.sort(key=lambda x: x[1])
+        
+        # Match in order of confidence
+        for det_idx, _ in detection_scores:
+            best_match = None
+            best_distance = float('inf')
+            
+            for peg_id in active_peg_ids:
+                if peg_id in matched_pegs:
+                    continue
+                
+                predicted_pos = predictions.get(peg_id, self.pegs[peg_id]['position_3d'])
+                distance = np.linalg.norm(predicted_pos - np.array(triangulated_3d[det_idx]))
+                
+                if distance < self.max_distance_3d and distance < best_distance:
+                    best_match = peg_id
+                    best_distance = distance
+            
+            if best_match is not None:
+                self._update_peg(best_match, left_detections[det_idx], right_detections[det_idx], triangulated_3d[det_idx])
+                matched_pegs.add(best_match)
+                used_detections.add(det_idx)
+        
+        # Increment missing frames for unmatched pegs
+        for peg_id in active_peg_ids:
+            if peg_id not in matched_pegs:
+                self.pegs[peg_id]['missing_frames'] += 1
+        
+        return self.get_current_state()
+    
+    def _predict_positions(self):
+        """Predict next positions based on velocity"""
+        predictions = {}
+        for peg_id, peg in self.pegs.items():
+            if peg['missing_frames'] < self.max_missing_frames:
+                # Simple linear prediction
+                predictions[peg_id] = np.array(peg['position_3d']) + peg['velocity_3d']
+        return predictions
+    
+    def _update_peg(self, peg_id, left_2d, right_2d, position_3d):
+        """Update individual peg"""
+        peg = self.pegs[peg_id]
+        
+        # Calculate movement and velocity
+        movement = np.array(position_3d) - np.array(peg['position_3d'])
+        movement_magnitude = np.linalg.norm(movement)
+        
+        # Update velocity with simple smoothing
+        alpha = 0.3  # Smoothing factor
+        peg['velocity_3d'] = alpha * movement + (1 - alpha) * peg['velocity_3d']
+        
+        # Update position
+        peg['left_2d'] = left_2d
+        peg['right_2d'] = right_2d
+        peg['position_3d'] = position_3d
+        peg['last_seen'] = self.frame_count
+        peg['missing_frames'] = 0
+        
+        # Track movement history
+        peg['movement_history'].append(movement_magnitude)
+        peg['total_movement'] += movement_magnitude
+        
+        # Update confidence based on movement consistency
+        if movement_magnitude < 5:  # Small movement = high confidence
+            peg['confidence'] = min(1.0, peg['confidence'] + 0.02)
+        elif movement_magnitude > 30:  # Large movement = lower confidence
+            peg['confidence'] = max(0.3, peg['confidence'] - 0.05)
+    
+    def get_current_state(self):
+        """Get current state of all pegs"""
+        current_pegs = {}
+        for peg_id, peg in self.pegs.items():
+            if peg['missing_frames'] < self.max_missing_frames:
+                # Calculate recent movement for this peg
+                recent_movements = list(peg['movement_history'])[-10:]  # Last 10 frames
+                avg_recent_movement = np.mean(recent_movements) if recent_movements else 0
+                
+                current_pegs[peg_id] = {
+                    'left_2d': peg['left_2d'],
+                    'right_2d': peg['right_2d'],
+                    'position_3d': peg['position_3d'],
+                    'confidence': peg['confidence'],
+                    'movement_score': avg_recent_movement,
+                    'is_being_moved': avg_recent_movement > self.movement_threshold
+                }
+        return current_pegs
+    
+    def get_moving_peg_id(self):
+        """Identify which peg is currently being moved"""
+        if not self.is_initialized:
+            return None
+        
+        movement_scores = {}
+        for peg_id, peg in self.pegs.items():
+            if peg['missing_frames'] < self.max_missing_frames and len(peg['movement_history']) > 5:
+                # Average movement over recent frames
+                recent_movements = list(peg['movement_history'])[-10:]
+                avg_movement = np.mean(recent_movements)
+                movement_scores[peg_id] = avg_movement
+        
+        if movement_scores:
+            moving_peg_id = max(movement_scores, key=movement_scores.get)
+            if movement_scores[moving_peg_id] > self.movement_threshold:
+                return moving_peg_id
+        
+        return None
 
-pegs = [Peg(i) for i in range(6)]
+# Initialize tracker
+tracker = OptimizedPegTracker()
 
 if __name__ == "__main__":
+    try:
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+                
+            left_frame = frame[:, :800]
+            right_frame = frame[:, 800:]
 
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-            
-        left_frame = frame[:, :800]
-        right_frame = frame[:, 800:]
+            map1x, map1y = cv2.initUndistortRectifyMap(K1, D1, R1, P1, image_size, cv2.CV_32FC1)
+            map2x, map2y = cv2.initUndistortRectifyMap(K2, D2, R2, P2, image_size, cv2.CV_32FC1)
 
-        left_frame = cv2.remap(left_frame, map1x, map1y, cv2.INTER_LINEAR)
-        right_frame = cv2.remap(right_frame, map2x, map2y, cv2.INTER_LINEAR)
+            left_frame = cv2.remap(left_frame, map1x, map1y, cv2.INTER_LINEAR)
+            right_frame = cv2.remap(right_frame, map2x, map2y, cv2.INTER_LINEAR)
 
-        # def draw_horizontal_line(img, interval=40):
-        #     for y in range(0, img.shape[0], interval):
-        #         cv2.line(img, (0, y), (img.shape[1], y), (0, 255, 0), 1)
-            
-        #     return img
-        
-        # debug_left = draw_horizontal_line(left_frame.copy())
-        # debug_right = draw_horizontal_line(right_frame.copy())
+            send_frame_left(left_frame, count)
+            send_frame_right(right_frame, count)
 
-        # cv2.imshow("Left Frame", debug_left)
-        # cv2.imshow("Right Frame", debug_right)
-        # cv2.waitKey(1)
+            count += 1
 
+            left_frame_peg, right_frame_peg = res_without_rectify(right_frame, left_frame)
 
-        left_frame_peg, right_frame_peg = res_without_rectify(right_frame, left_frame)
+            # Handle different detection counts
+            pegsInCamera = []
+            if left_frame_peg and right_frame_peg:
+                if len(left_frame_peg) == 6 and len(right_frame_peg) == 6:
+                    # Perfect case - use your existing pairing logic
+                    try:
+                        left_frame_peg, right_frame_peg = find_pairs(left_frame_peg, right_frame_peg)
+                        pegsInCamera = find_3D_points(left_frame_peg, right_frame_peg)
+                    except (IndexError, ValueError) as e:
+                        print(f"Error in find_pairs: {e}")
+                        pegsInCamera = []
+                elif len(left_frame_peg) > 0 and len(right_frame_peg) > 0:
+                    # Partial detections - use simpler pairing
+                    try:
+                        left_frame_peg, right_frame_peg = find_pairs2(left_frame_peg, right_frame_peg)
+                        if left_frame_peg and right_frame_peg:
+                            pegsInCamera = find_3D_points(left_frame_peg, right_frame_peg)
+                    except (IndexError, ValueError) as e:
+                        print(f"Error in find_pairs2: {e}")
+                        pegsInCamera = []
 
-        # colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255), (0, 255, 255)]
+            # Update tracker
+            current_pegs = tracker.update_tracks(left_frame_peg or [], right_frame_peg or [], pegsInCamera)
+            moving_peg_id = tracker.get_moving_peg_id()
 
-        # for i in range(6):
-        #     pt_left = (int(left_frame_peg[i][0]), int(left_frame_peg[i][1]))
-        #     pt_right = (int(right_frame_peg[i][0]), int(right_frame_peg[i][1]))
-        #     cv2.circle(left_frame, pt_left, 5, colors[i], -1)
-        #     cv2.circle(right_frame, pt_right, 5, colors[i], -1)
+            # Send data based on tracker state
+            message = {}
+            if tracker.is_initialized and current_pegs:
+                # Use tracked positions
+                peg_counter = 1
+                for peg_id, peg_data in current_pegs.items():
+                    x, y, z = peg_data['position_3d']
+                    try:
+                        transformed_pos = trasform_pegs([(x, y, z)])[0]
+                        message[str(peg_counter)] = {
+                            "x": round(transformed_pos[0], 3),
+                            "y": round(transformed_pos[1], 3),
+                            "z": round(transformed_pos[2], 3)
+                        }
+                        peg_counter += 1
+                    except (IndexError, ValueError) as e:
+                        print(f"Error transforming peg: {e}")
+                        continue
+                
+                # Add moving peg info if needed
+                if moving_peg_id is not None:
+                    message["moving_peg"] = str(moving_peg_id)
+                    
+                #print(f"Tracking {len(current_pegs)} pegs, moving peg: {moving_peg_id}")
+            elif len(pegsInCamera) == 6:
+                # Fallback to direct detection during initialization
+                try:
+                    print(len(pegsInCamera), len(current_pegs))
+                    pegsInHololens = trasform_pegs(pegsInCamera)
+                    for i, (x, y, z) in enumerate(pegsInHololens):
+                        message[str(i+1)] = {
+                            "x": round(x, 3),
+                            "y": round(y, 3),
+                            "z": round(z, 3)
+                        }
+                    print(f"Initialization: detected {len(pegsInCamera)} pegs")
+                except Exception as e:
+                    print(f"Error during initialization: {e}")
+                    continue
+            else:
+                # Skip frame if not enough detections
+                print(f"Insufficient detections: L={len(left_frame_peg or [])}, R={len(right_frame_peg or [])}")
+                continue
 
-        # def draw_horizontal_line(img, interval=40):
-        #     for y in range(0, img.shape[0], interval):
-        #         cv2.line(img, (0, y), (img.shape[1], y), (0, 255, 0), 1)
-            
-        #     return img
-        
-        # left_frame = draw_horizontal_line(left_frame)
-        # right_frame = draw_horizontal_line(right_frame)
-        # cv2.imshow("Left Frame Pegs", left_frame)
-        # cv2.imshow("Right Frame Pegs", right_frame)
-        # cv2.waitKey(1)
+            if message:
+                try:
+                    message_json = json.dumps(message)
+                    output_socket.sendto(message_json.encode('utf-8'), (OUTPUT_IP, OUTPUT_PORT))
+                except Exception as e:
+                    print(f"Error sending message: {e}")
 
-        #print(f"Left Frame Pegs: {left_frame_peg}")
-        #print(f"Right Frame Pegs: {right_frame_peg}")
+            # After the tracker.update_tracks call, add:
+            if tracker.is_initialized:
+                print(f"Frame {count}: Tracking {len(current_pegs)}/6 pegs, Moving: {moving_peg_id}")
 
-        if left_frame_peg is None or right_frame_peg is None:
-            continue
-
-        if len(left_frame_peg) != 6 or len(right_frame_peg) != 6:
-            continue
-
-        #print(cv2.decomposeProjectionMatrix(P1).shape)
-
-        # pegsInCamera = find_3D_points(left_frame_peg, right_frame_peg)
-        # if not pegsInCamera:
-        #     continue
-        
-        # print(f"Pegs in Camera Coordinates: {pegsInCamera}")
-
-        pairs = find_pairs(left_frame_peg, right_frame_peg)
-        if pairs:
-            best_pair = pairs[0]  # Assuming first valid pair is best
-            l_p = [p[0] for p in best_pair]
-            r_p = [p[1] for p in best_pair]
-
-            pegs_3d = find_3D_points(l_p, r_p)
-            assign_points_to_pegs(pegs_3d, pegs)
-            peg_positions = [peg.get_position() for peg in pegs]
-            for i, peg in enumerate(pegs):
-                print(f"Peg {i} position: {peg.get_position()}")
-            plot_3d_pegs_live(peg_positions)
-
-
-        # result = triangulate_best_peg_matches(left_frame_peg, right_frame_peg, K1, D1, R1, P1, K2, D2, R2, P2)
-        # break
-
-        # # pegsInHololens = trasformed_pegs(pegsInCamera)
-
-        # # for i, (x, y, z) in enumerate(pegsInHololens):
-        # #     message = {"X": round(x, 2), "Y": round(y, 2), "Z": round(z, 2)}
-
-        # # message = json.dumps(message)
-        # # output_socket.sendto(message.encode('utf-8'), (OUTPUT_IP, OUTPUT_PORT))
-        # # os.system('cls' if os.name == 'nt' else 'clear')
-        # # print(f" Sent: {x:.2f}, {y:.2f}, {z:.2f}")
+    except KeyboardInterrupt:
+        print("Stopping...")
+    finally:
+        cap.release()
+        output_socket.close()
+        left_sock.close()
+        right_sock.close()
+        cv2.destroyAllWindows()
