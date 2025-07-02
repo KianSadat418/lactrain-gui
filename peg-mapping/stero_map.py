@@ -192,7 +192,7 @@ class PegKalmanFilter:
         # Measurement matrix: only position is observed
         self.kf.measurementMatrix = np.eye(3, 6, dtype=np.float32)
 
-        self.kf.processNoiseCov = np.eye(6, dtype=np.float32) * 1e-2  # Lower → smoother, Higher → adapts quicker
+        self.kf.processNoiseCov = np.eye(6, dtype=np.float32) * 1e-4  # Lower → smoother, Higher → adapts quicker
         self.kf.measurementNoiseCov = np.eye(3, dtype=np.float32) * 1e-1  # Lower = more trust in detections
         self.kf.errorCovPost = np.eye(6, dtype=np.float32) * 1  # Initial uncertainty
 
@@ -220,6 +220,7 @@ class OptimizedPegTracker:
         self.max_distance_2d = 30  # pixels (considering 60fps, movement should be small between frames)
         self.max_distance_3d = 40  # mm (5cm/s at 60fps = ~0.8mm per frame, with safety margin)
         self.max_missing_frames = 8  # 0.5 seconds at 60fps
+        self.max_prediction_frames = self.max_missing_frames + 15
         self.initialization_frames = 5  # Require stable detection for initialization
         
         self.pegs = {}
@@ -494,11 +495,24 @@ class OptimizedPegTracker:
             if peg is None:
                 continue  # Should not happen, but safe check
 
-            if peg['missing_frames'] < self.max_missing_frames:
-                pos = peg['position_3d']
-            else:
-                # Predict if missing
-                pos = peg['kf'].predict().tolist()
+            if peg['missing_frames'] < self.max_prediction_frames:
+                if peg['missing_frames'] < self.max_missing_frames:
+                    pos = peg['position_3d']
+                    status = "tracked"
+                else:
+                    pos = peg['kf'].predict().tolist()
+                    status = "predicted"
+
+                # Apply exponential confidence decay
+                decay_factor = 0.9 ** (peg['missing_frames'] - self.max_missing_frames)
+                confidence = max(0.0, peg['confidence'] * decay_factor)
+
+                state[str(peg_id)] = {
+                    "position_3d": pos,
+                    "moving": peg.get('is_moving', False),
+                    "confidence": round(confidence, 3),
+                    "status": status
+                }
 
             state[str(peg_id)] = {
                 "position_3d": pos,
@@ -531,7 +545,7 @@ class OptimizedPegTracker:
         """Return the predicted position of a peg if not currently detected."""
         if peg_id in self.pegs:
             peg = self.pegs[peg_id]
-            if peg['missing_frames'] < self.max_missing_frames:
+            if peg['missing_frames'] < self.max_prediction_frames:
                 return peg['position_3d']  # Use last known
             else:
                 return peg['kf'].predict().tolist()  # Kalman-based prediction
@@ -542,6 +556,8 @@ tracker = OptimizedPegTracker()
 
 if __name__ == "__main__":
     try:
+        map1x, map1y = cv2.initUndistortRectifyMap(K1, D1, R1, P1, image_size, cv2.CV_32FC1)
+        map2x, map2y = cv2.initUndistortRectifyMap(K2, D2, R2, P2, image_size, cv2.CV_32FC1)
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
@@ -549,9 +565,6 @@ if __name__ == "__main__":
                 
             left_frame = frame[:, :800]
             right_frame = frame[:, 800:]
-
-            map1x, map1y = cv2.initUndistortRectifyMap(K1, D1, R1, P1, image_size, cv2.CV_32FC1)
-            map2x, map2y = cv2.initUndistortRectifyMap(K2, D2, R2, P2, image_size, cv2.CV_32FC1)
 
             left_frame = cv2.remap(left_frame, map1x, map1y, cv2.INTER_LINEAR)
             right_frame = cv2.remap(right_frame, map2x, map2y, cv2.INTER_LINEAR)
