@@ -502,8 +502,8 @@ class OptimizedPegTracker:
 
             state[str(peg_id)] = {
                 "position_3d": pos,
-                "moving": peg['is_moving'],
-                "confidence": peg['confidence']
+                "moving": peg.get('is_moving', False),
+                "confidence": peg.get('confidence', 1.0)
             }
         return state
     
