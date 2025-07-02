@@ -644,9 +644,25 @@ if __name__ == "__main__":
                     print(f"Error during initialization: {e}")
                     continue
             else:
-                # Skip frame if not enough detections
                 print(f"Insufficient detections: L={len(left_frame_peg or [])}, R={len(right_frame_peg or [])}")
-                continue
+                
+                if tracker.is_initialized:
+                    # Fallback to predictions only
+                    for peg_id in range(6):
+                        x, y, z = tracker.get_predicted_position(peg_id)
+                        try:
+                            if None not in (x, y, z):
+                                transformed_pos = transform_pegs([(x, y, z)])[0]
+                                message[str(peg_id + 1)] = {
+                                    "x": round(transformed_pos[0], 3),
+                                    "y": round(transformed_pos[1], 3),
+                                    "z": round(transformed_pos[2], 3)
+                                }
+                        except Exception as e:
+                            print(f"Error transforming predicted peg {peg_id}: {e}")
+                else:
+                    # Still initializing — skip this frame
+                    continue
 
             if message:
                 try:
