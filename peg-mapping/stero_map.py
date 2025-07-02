@@ -174,6 +174,45 @@ def res_without_rectify(right_frame, left_frame):
 
     return left_frame_peg, right_frame_peg
 
+class PegKalmanFilter:
+    def __init__(self):
+        self.kf = cv2.KalmanFilter(6, 3)  # 6 state vars: pos (x,y,z) + vel (vx,vy,vz), 3 measurements
+
+        # Transition matrix: x_k = A * x_(k-1)
+        dt = 1.0  # Assume 1 frame per time step
+        self.kf.transitionMatrix = np.array([
+            [1, 0, 0, dt, 0, 0],
+            [0, 1, 0, 0, dt, 0],
+            [0, 0, 1, 0, 0, dt],
+            [0, 0, 0, 1, 0, 0],
+            [0, 0, 0, 0, 1, 0],
+            [0, 0, 0, 0, 0, 1]
+        ], dtype=np.float32)
+
+        # Measurement matrix: only position is observed
+        self.kf.measurementMatrix = np.eye(3, 6, dtype=np.float32)
+
+        self.kf.processNoiseCov = np.eye(6, dtype=np.float32) * 1e-2  # Lower → smoother, Higher → adapts quicker
+        self.kf.measurementNoiseCov = np.eye(3, dtype=np.float32) * 1e-1  # Lower = more trust in detections
+        self.kf.errorCovPost = np.eye(6, dtype=np.float32) * 1  # Initial uncertainty
+
+        self.kf.statePost = np.zeros((6, 1), dtype=np.float32)
+
+    def initialize(self, xyz):
+        """Set initial position and zero velocity"""
+        x, y, z = xyz
+        self.kf.statePost[:3, 0] = [x, y, z]
+        self.kf.statePost[3:, 0] = [0, 0, 0]
+
+    def predict(self):
+        pred = self.kf.predict()
+        return pred[:3].flatten()
+
+    def correct(self, xyz):
+        measurement = np.array(xyz, dtype=np.float32).reshape(3, 1)
+        corrected = self.kf.correct(measurement)
+        return corrected[:3].flatten()
+
 
 class OptimizedPegTracker:
     def __init__(self):
@@ -239,6 +278,8 @@ class OptimizedPegTracker:
             # Initialize pegs
             for i in range(6):
                 peg_id = self.next_peg_id
+                peg_filter = PegKalmanFilter()
+                peg_filter.initialize(latest_frame['triangulated'][i])
                 self.pegs[peg_id] = {
                     'left_2d': latest_frame['left'][i],
                     'right_2d': latest_frame['right'][i],
@@ -248,7 +289,8 @@ class OptimizedPegTracker:
                     'missing_frames': 0,
                     'movement_history': deque(maxlen=self.movement_history_size),
                     'confidence': 1.0,
-                    'total_movement': 0.0
+                    'total_movement': 0.0,
+                    'kf': peg_filter
                 }
                 self.next_peg_id += 1
             
@@ -277,11 +319,12 @@ class OptimizedPegTracker:
         """Update when we have exactly 6 detections"""
         active_peg_ids = [pid for pid, peg in self.pegs.items() if peg['missing_frames'] < self.max_missing_frames]
         
-        if len(active_peg_ids) != 6:
-            # Something went wrong, reinitialize
+        if len(active_peg_ids) < 3:
+            print("[Reset] Too many pegs missing. Reinitializing tracker.")
             self.is_initialized = False
+            self.pegs.clear()
+            self.next_peg_id = 0
             self.initialization_buffer.clear()
-            return self.get_current_state()
         
         # Create cost matrix based on 3D distance with velocity prediction
         cost_matrix = np.zeros((6, 6))
@@ -329,11 +372,11 @@ class OptimizedPegTracker:
             for peg_id in active_peg_ids:
                 if peg_id in matched_pegs:
                     continue
-                predicted_pos = predictions.get(peg_id, self.pegs[peg_id]['position_3d'])
+                predicted_pos = self.pegs[peg_id]['kf'].predict()
                 distance = np.linalg.norm(predicted_pos - np.array(detection_3d))
                 best_distance = min(best_distance, distance)
             detection_scores.append((i, best_distance))
-        
+  
         # Sort by best distance (most confident matches first)
         detection_scores.sort(key=lambda x: x[1])
         
@@ -341,20 +384,21 @@ class OptimizedPegTracker:
         for det_idx, _ in detection_scores:
             best_match = None
             best_distance = float('inf')
-            
+            detection = np.array(triangulated_3d[det_idx])
+
             for peg_id in active_peg_ids:
                 if peg_id in matched_pegs:
                     continue
-                
-                predicted_pos = predictions.get(peg_id, self.pegs[peg_id]['position_3d'])
-                distance = np.linalg.norm(predicted_pos - np.array(triangulated_3d[det_idx]))
-                
+
+                predicted_pos = self.pegs[peg_id]['kf'].predict()
+                distance = np.linalg.norm(predicted_pos - detection)
+
                 if distance < self.max_distance_3d and distance < best_distance:
                     best_match = peg_id
                     best_distance = distance
-            
+
             if best_match is not None:
-                self._update_peg(best_match, left_detections[det_idx], right_detections[det_idx], triangulated_3d[det_idx])
+                self._update_peg(best_match, left_detections[det_idx], right_detections[det_idx], detection.tolist())
                 matched_pegs.add(best_match)
                 used_detections.add(det_idx)
         
@@ -362,6 +406,36 @@ class OptimizedPegTracker:
         for peg_id in active_peg_ids:
             if peg_id not in matched_pegs:
                 self.pegs[peg_id]['missing_frames'] += 1
+
+        # Try to recover lost pegs
+        lost_pegs = [
+            pid for pid, peg in self.pegs.items()
+            if peg['missing_frames'] >= self.max_missing_frames and peg['missing_frames'] < self.max_missing_frames + 10
+        ]
+
+        for det_idx in range(len(triangulated_3d)):
+            if det_idx in used_detections:
+                continue
+
+            detection = np.array(triangulated_3d[det_idx])
+
+            for peg_id in lost_pegs:
+                predicted_pos = self.pegs[peg_id]['kf'].predict()
+                distance = np.linalg.norm(predicted_pos - detection)
+
+                if distance < self.max_distance_3d:
+                    # Consider it recovered
+                    self.pegs[peg_id]['missing_frames'] = 0
+                    self.pegs[peg_id]['position_3d'] = detection.tolist()
+                    self.pegs[peg_id]['kf'].correct(detection.tolist())
+                    self.pegs[peg_id]['left_2d'] = left_detections[det_idx]
+                    self.pegs[peg_id]['right_2d'] = right_detections[det_idx]
+                    self.pegs[peg_id]['last_seen'] = self.frame_count
+
+                    self.pegs[peg_id]['movement_history'].append(0.0)
+                    used_detections.add(det_idx)
+                    print(f"[Recovery] Peg {peg_id} reappeared.")
+                    break
         
         return self.get_current_state()
     
@@ -378,18 +452,20 @@ class OptimizedPegTracker:
         """Update individual peg"""
         peg = self.pegs[peg_id]
         
-        # Calculate movement and velocity
-        movement = np.array(position_3d) - np.array(peg['position_3d'])
-        movement_magnitude = np.linalg.norm(movement)
-        
-        # Update velocity with simple smoothing
+        # Kalman correction
         alpha = 0.3  # Smoothing factor
+        filtered_pos = peg['kf'].correct(position_3d)
+
+        # Estimate velocity and position
+        movement = filtered_pos - np.array(peg['position_3d'])
+        movement_magnitude = np.linalg.norm(movement)
+
         peg['velocity_3d'] = alpha * movement + (1 - alpha) * peg['velocity_3d']
+        peg['position_3d'] = filtered_pos.tolist()
         
         # Update position
         peg['left_2d'] = left_2d
         peg['right_2d'] = right_2d
-        peg['position_3d'] = position_3d
         peg['last_seen'] = self.frame_count
         peg['missing_frames'] = 0
         
@@ -441,6 +517,16 @@ class OptimizedPegTracker:
                 return moving_peg_id
         
         return None
+    
+    def get_predicted_position(self, peg_id):
+        """Return the predicted position of a peg if not currently detected."""
+        if peg_id in self.pegs:
+            peg = self.pegs[peg_id]
+            if peg['missing_frames'] < self.max_missing_frames:
+                return peg['position_3d']  # Use last known
+            else:
+                return peg['kf'].predict().tolist()  # Kalman-based prediction
+        return [None, None, None]
 
 # Initialize tracker
 tracker = OptimizedPegTracker()
@@ -498,19 +584,22 @@ if __name__ == "__main__":
             if tracker.is_initialized and current_pegs:
                 # Use tracked positions
                 peg_counter = 1
-                for peg_id, peg_data in current_pegs.items():
-                    x, y, z = peg_data['position_3d']
+                for peg_id in range(6):  # Always send 6 pegs
+                    if peg_id in current_pegs:
+                        x, y, z = current_pegs[peg_id]['position_3d']
+                    else:
+                        x, y, z = tracker.get_predicted_position(peg_id)
+
                     try:
-                        transformed_pos = transform_pegs([(x, y, z)])[0]
-                        message[str(peg_counter)] = {
-                            "x": round(transformed_pos[0], 3),
-                            "y": round(transformed_pos[1], 3),
-                            "z": round(transformed_pos[2], 3)
-                        }
-                        peg_counter += 1
-                    except (IndexError, ValueError) as e:
-                        print(f"Error transforming peg: {e}")
-                        continue
+                        if None not in (x, y, z):
+                            transformed_pos = transform_pegs([(x, y, z)])[0]
+                            message[str(peg_id + 1)] = {
+                                "x": round(transformed_pos[0], 3),
+                                "y": round(transformed_pos[1], 3),
+                                "z": round(transformed_pos[2], 3)
+                            }
+                    except Exception as e:
+                        print(f"Error transforming peg {peg_id}: {e}")
                 
                 # Add moving peg info if needed
                 if moving_peg_id is not None:
