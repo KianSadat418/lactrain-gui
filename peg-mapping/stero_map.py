@@ -219,7 +219,7 @@ class OptimizedPegTracker:
         # Adjusted parameters based on your specs
         self.max_distance_2d = 30  # pixels (considering 60fps, movement should be small between frames)
         self.max_distance_3d = 40  # mm (5cm/s at 60fps = ~0.8mm per frame, with safety margin)
-        self.max_missing_frames = 8  # 0.5 seconds at 60fps
+        self.max_missing_frames = 15  # 0.5 seconds at 60fps
         self.max_prediction_frames = self.max_missing_frames + 15
         self.initialization_frames = 5  # Require stable detection for initialization
         
@@ -320,13 +320,14 @@ class OptimizedPegTracker:
         """Update when we have exactly 6 detections"""
         active_peg_ids = [pid for pid, peg in self.pegs.items() if peg['missing_frames'] < self.max_missing_frames]
         
-        if len(active_peg_ids) < 3:
-            print("[Reset] Too many pegs missing. Reinitializing tracker.")
+        if len(active_peg_ids) == 0:
+            print("[Reset] All pegs missing. Reinitializing tracker.")
             self.is_initialized = False
             self.pegs.clear()
             self.next_peg_id = 0
             self.initialization_buffer.clear()
-        
+            return self.get_current_state()
+ 
         # Create cost matrix based on 3D distance with velocity prediction
         if len(active_peg_ids) != len(triangulated_3d):
             print(f"[Warning] Mismatch: {len(active_peg_ids)} active pegs vs {len(triangulated_3d)} detections.")
@@ -513,12 +514,6 @@ class OptimizedPegTracker:
                     "confidence": round(confidence, 3),
                     "status": status
                 }
-
-            state[str(peg_id)] = {
-                "position_3d": pos,
-                "moving": peg.get('is_moving', False),
-                "confidence": peg.get('confidence', 1.0)
-            }
         return state
     
     def get_moving_peg_id(self):
