@@ -319,14 +319,6 @@ class OptimizedPegTracker:
     def _update_with_full_detections(self, left_detections, right_detections, triangulated_3d):
         """Update when we have exactly 6 detections"""
         active_peg_ids = [pid for pid, peg in self.pegs.items() if peg['missing_frames'] < self.max_missing_frames]
-        
-        if len(active_peg_ids) == 0:
-            print("[Reset] All pegs missing. Reinitializing tracker.")
-            self.is_initialized = False
-            self.pegs.clear()
-            self.next_peg_id = 0
-            self.initialization_buffer.clear()
-            return self.get_current_state()
  
         # Create cost matrix based on 3D distance with velocity prediction
         if len(active_peg_ids) != len(triangulated_3d):
