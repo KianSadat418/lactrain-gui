@@ -3,7 +3,9 @@ import socket
 from datetime import datetime
 import json
 from typing import List
+from collections import deque
 import numpy as np
+import os
 
 import PyQt5.QtCore as QtCore
 import PyQt5.QtWidgets as QtWidgets
@@ -21,11 +23,9 @@ MATRIX_BUTTON_LABELS = [
 
 # Length of the gaze ray and radius of the disc at the end of the line
 GAZE_LINE_LENGTH = 500.0
-DISC_RADIUS = 40.0
+DISC_RADIUS = 0.04
 
 def load_transform_matrices_from_file(path: str):
-    import os
-
     if not path or not os.path.isfile(path):
         raise FileNotFoundError("No valid file selected or file does not exist.")
 
@@ -181,7 +181,10 @@ class DataReceiver(QtCore.QThread):
                     )
 
                 elif line.startswith("G"):
+                    print("[Receiver] Full Gaze Message Received:", data)
                     data = json.loads(line[1:])
+                    print("[Receiver] Pegs shape:", np.array(data.get("pegs", [])).shape)
+
                     self.full_gaze_received.emit(
                         np.array(data.get("gaze_line")),
                         float(data.get("roi", 0.0)),
@@ -261,6 +264,9 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         self.latest_pegs = []
         self.latest_gaze_distance = 0.0
         self.fix_view_actors = []
+
+        self.peg_smoothing_enabled = True  # toggle if needed
+        self.peg_history = [deque(maxlen=5) for _ in range(6)]
 
         self.receiver = None
         if enable_receiver:
@@ -410,6 +416,19 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         self.record_timer.setInterval(100)
         self.record_timer.timeout.connect(self._log_current_frame)
 
+    def set_peg_of_interest(self, index: int):
+        self.peg_of_interest_index = index
+        print(f"[GazeTracking] Peg of interest set to: {index}")
+        self._update_gaze_line()
+
+        # Optional: Send peg selection to Unity
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            message = f'P{index}'  # Prefix with 'P' to indicate peg selection
+            sock.sendto(message.encode('utf-8'), ('127.0.0.1', 9989))  # Match Unity's `listenPort`
+            sock.close()
+        except Exception as e:
+            print(f"[GazeTracking] Failed to send peg selection: {e}")
 
     @QtCore.pyqtSlot(object, float, int, float, object)
     def update_gaze_data(self, gaze_line, roi, intercept, gaze_distance, pegs):
@@ -421,55 +440,62 @@ class GazeTrackingWindow(QtWidgets.QWidget):
 
             origin = gaze_arr[0]
             direction = gaze_arr[1]
-            length = np.linalg.norm(direction)
+            direction_norm = np.linalg.norm(direction)
+            if direction_norm == 0:
+                print("[GazeTracking] Zero-length direction vector.")
+                return
+            direction = direction / direction_norm  # Normalize
 
-            # === Transform incoming peg coordinates ===
             peg_arr = np.array(pegs)
-            transformed_pegs = peg_arr
-            if peg_arr.shape == (6, 3):
-                idx = self.matrix_group.checkedId()
-                if 0 <= idx < len(self.transform_matrices):
-                    matrix = self.transform_matrices[idx]
-                    transformed_pegs = np.array(
-                        [(matrix @ np.append(p, 1.0))[:3] for p in peg_arr]
-                    )
-            else:
+            if peg_arr.shape != (6, 3):
                 print(f"[GazeTracking] Invalid peg shape: {peg_arr.shape}")
+                return
 
-            # === Determine dynamic line length using first transformed peg ===
-            if length == 0:
-                target = origin
+            idx = self.matrix_group.checkedId()
+            matrix = self.transform_matrices[idx] if 0 <= idx < len(self.transform_matrices) else np.eye(4)
+            transformed_pegs = np.array([(matrix @ np.append(p, 1.0))[:3] for p in peg_arr])
+
+            # Optional smoothing
+            if self.peg_smoothing_enabled:
+                for i in range(6):
+                    self.peg_history[i].append(transformed_pegs[i])
+                smoothed_pegs = np.array([np.mean(hist, axis=0) for hist in self.peg_history])
+            else:
+                smoothed_pegs = transformed_pegs
+
+            # Dynamically scale gaze line
+            peg_idx = self.peg_of_interest_index
+            if 0 <= peg_idx < 6:
+                gaze_length = np.linalg.norm(smoothed_pegs[peg_idx] - origin)
             else:
                 gaze_length = GAZE_LINE_LENGTH
-                if transformed_pegs.shape == (6, 3):
-                    gaze_length = np.linalg.norm(transformed_pegs[0])
-                target = origin + (direction / length) * gaze_length
+            target = origin + direction * gaze_length
 
             self.latest_gaze_line = np.array([origin, target])
             self.latest_roi = roi
             self.latest_intercept = intercept
             self.latest_gaze_distance = gaze_distance
-            self.latest_pegs = transformed_pegs
+            self.latest_pegs = smoothed_pegs
 
             self.gaze_distance_label.setText(f"Gaze Distance: {gaze_distance:.2f} mm")
             self._update_gaze_line()
+
         except Exception as e:
             print(f"[GazeTracking] Failed to update visuals: {e}")
 
     def _update_gaze_line(self):
-        if self.latest_gaze_line is None or not hasattr(self, "latest_pegs"):
+        if self.latest_gaze_line is None or self.latest_pegs is None:
             return
 
         A, B = self.latest_gaze_line
-        cone_center = A + 0.5 * (B - A)
         direction = B - A
         length = np.linalg.norm(direction)
         if length == 0:
             return
         norm_direction = direction / length
-        height = float(length)
+        cone_center = A + 0.5 * (B - A)
 
-        # === 1. Gaze Line ===
+        # --- 1. Gaze Line ---
         line = pv.Line(A, B)
         if hasattr(self, "gaze_line_mesh"):
             self.gaze_line_mesh.deep_copy(line)
@@ -478,7 +504,7 @@ class GazeTrackingWindow(QtWidgets.QWidget):
             self.gaze_line_mesh = line
             self.gaze_line_actor = self.plotter.add_mesh(self.gaze_line_mesh, color="green", line_width=3)
 
-        # === 2. Disc at End ===
+        # --- 2. Disc at End ---
         disc = pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction, r_res=1, c_res=10)
         if hasattr(self, "disc_mesh"):
             self.disc_mesh.deep_copy(disc)
@@ -487,9 +513,9 @@ class GazeTrackingWindow(QtWidgets.QWidget):
             self.disc_mesh = disc
             self.disc_actor = self.plotter.add_mesh(self.disc_mesh, color="cyan", opacity=0.5)
 
-        # === 3. Cone from Origin ===
+        # --- 3. Cone ---
         cone_color = "green" if self.latest_intercept else "red"
-        cone = pv.Cone(center=cone_center, direction=-norm_direction, height=height, radius=DISC_RADIUS)
+        cone = pv.Cone(center=cone_center, direction=-norm_direction, height=length, radius=DISC_RADIUS)
         if hasattr(self, "cone_mesh"):
             self.cone_mesh.deep_copy(cone)
             self.cone_mesh.Modified()
@@ -499,50 +525,48 @@ class GazeTrackingWindow(QtWidgets.QWidget):
             self.cone_mesh = cone
             self.cone_actor = self.plotter.add_mesh(self.cone_mesh, color=cone_color, opacity=0.3)
 
+        # --- 4. Update Peg Points Smoothly ---
         pegs = np.array(self.latest_pegs)
-
-        # === 4. Display Transformed Pegs ===
-        if pegs.shape == (6, 3):
-            self.transformed_peg_mesh.deep_copy(pv.PolyData(pegs))
+        if hasattr(self, "transformed_peg_mesh") and self.transformed_peg_mesh.n_points == 6:
+            self.transformed_peg_mesh.points = pegs
             self.transformed_peg_mesh.Modified()
+        else:
+            self.transformed_peg_mesh = pv.PolyData(pegs)
+            self.transformed_peg_actor = self.plotter.add_mesh(
+                self.transformed_peg_mesh, color="#300053", point_size=12, render_points_as_spheres=True
+            )
 
-            # === 5. ROI Sphere + Animated Line (peg of interest) ===
-            peg = pegs[self.peg_of_interest_index]
-            if hasattr(self, "roi_sphere_mesh"):
-                sphere = pv.Sphere(radius=self.latest_roi, center=peg)
-                self.roi_sphere_mesh.deep_copy(sphere)
-                self.roi_sphere_mesh.Modified()
+        # --- 5. ROI Sphere and Dashed Line to Peg of Interest ---
+        peg = pegs[self.peg_of_interest_index]
+        if hasattr(self, "roi_sphere_mesh"):
+            sphere = pv.Sphere(radius=self.latest_roi, center=peg)
+            self.roi_sphere_mesh.deep_copy(sphere)
+            self.roi_sphere_mesh.Modified()
+        else:
+            self.roi_sphere_mesh = pv.Sphere(radius=self.latest_roi, center=peg)
+            self.roi_sphere_actor = self.plotter.add_mesh(self.roi_sphere_mesh, color="green", opacity=0.2)
+
+        def closest_point_on_line(p, a, b):
+            ab = b - a
+            t = np.dot(p - a, ab) / np.dot(ab, ab)
+            return a + np.clip(t, 0, 1) * ab
+
+        closest_point = closest_point_on_line(peg, A, B)
+        dashed_pairs = np.linspace(closest_point, peg, self.dashed_segments * 2).reshape(-1, 2, 3)
+
+        for i in range(self.dashed_segments):
+            if i < len(dashed_pairs) and i % 2 == 0:
+                start, end = dashed_pairs[i]
+                mesh = self.dashed_meshes[i // 2]
+                mesh.points = np.array([start, end])
+                mesh.lines = np.array([2, 0, 1])
+                mesh.Modified()
             else:
-                self.roi_sphere_mesh = pv.Sphere(radius=self.latest_roi, center=peg)
-                self.roi_sphere_actor = self.plotter.add_mesh(self.roi_sphere_mesh, color="green", opacity=0.2)
-
-            def closest_point_on_line(p, a, b):
-                ab = b - a
-                t = np.dot(p - a, ab) / np.dot(ab, ab)
-                t = np.clip(t, 0, 1)
-                return a + t * ab
-
-            closest_point = closest_point_on_line(peg, A, B)
-            dashed_pairs = np.linspace(closest_point, peg, self.dashed_segments * 2).reshape(-1, 2, 3)
-
-            for i in range(self.dashed_segments):
-                if i < len(dashed_pairs) and i % 2 == 0:
-                    start, end = dashed_pairs[i]
-                    mesh = self.dashed_meshes[i // 2]
-                    mesh.points = np.array([start, end])
-                    mesh.lines = np.array([2, 0, 1])
-                    mesh.Modified()
-                else:
-                    self.dashed_meshes[i // 2].points = np.array([[0, 0, 0], [0, 0, 0]])
-                    self.dashed_meshes[i // 2].Modified()
-
-    def set_peg_of_interest(self, index: int):
-        self.peg_of_interest_index = index
-        print(f"[GazeTracking] Peg of interest set to: {index}")
-        self._update_gaze_line()
+                self.dashed_meshes[i // 2].points = np.array([[0, 0, 0], [0, 0, 0]])
+                self.dashed_meshes[i // 2].Modified()
 
     def load_matrices_from_file(self):
-        path = "Assets/Scripts/GUI/transform_data.txt"
+        path = "C:\\Users\\kiansadat\\Desktop\\Azimi Project\\3D Eye Gaze\\Assets\\Scripts\\GUI\\transform_data.txt"
 
         if not path:  # User cancelled or didn't choose anything
             QtWidgets.QMessageBox.warning(self, "Load Failed", "No file selected.")
@@ -1302,7 +1326,7 @@ class MainWindow(QtWidgets.QWidget):
         self._zoom(0.8)
 
     def handle_matrix_mode(self):
-        matrix_path = "Assets/Scripts/GUI/transform_data.txt"
+        matrix_path = "C:\\Users\\kiansadat\\Desktop\\Azimi Project\\3D Eye Gaze\\Assets\\Scripts\\GUI\\transform_data.txt"
         try:
             result = load_transform_matrices_from_file(matrix_path)
             self.transform_matrices = result["matrices"]
