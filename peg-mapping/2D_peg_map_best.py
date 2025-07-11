@@ -1,11 +1,8 @@
 import cv2
 import numpy as np
 import socket
-import time
 import math
-from collections import deque, defaultdict
 from ultralytics import YOLO
-from scipy.optimize import linear_sum_assignment
 
 import os
 # Set environment variable to handle OpenMP runtime warning
@@ -21,6 +18,7 @@ right_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 output_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 model = YOLO("C:\\Users\\kiansadat\\Desktop\\Azimi Project\\3D Eye Gaze\\Assets\\Scripts\\Peg-Detection-Scripts\\Training-05-22\\result\\content\\runs\\detect\\yolo8_peg_detector\\weights\\best.pt")
+transformation_matrix = np.identity(3)
 
 def setup_camera(camera_index=1, width=800, height=600):
     cap = cv2.VideoCapture(camera_index)
@@ -260,6 +258,41 @@ class PegTracker:
         
         return [p for p in self.pegs if p is not None]
 
+    def transform_pegs(pegs):
+        """Transform 3D points from camera coordinates to world coordinates."""
+        transformed_pegs = []
+        for x, y in pegs:
+            p = np.array([x, y, 1.0])
+            p_transformed = transformation_matrix @ p
+            transformed_pegs.append(p_transformed[:2])
+        return transformed_pegs
+
+    def send_frame_left(frame, frame_id=0):
+        _, buffer = cv2.imencode(".jpg", frame)
+        data = buffer.tobytes()
+        total_chunks = (len(data) + CHUNK_SIZE - 1) // CHUNK_SIZE
+        
+        header = struct.pack('!II', frame_id, total_chunks)
+        left_sock.sendto(b'H' + header, (OUTPUT_IP, UNITY_LEFT_PORT))
+        
+        for i in range(total_chunks):
+            chunk_data = data[i*CHUNK_SIZE:(i+1)*CHUNK_SIZE]
+            chunk_header = struct.pack('!II', frame_id, i)
+            left_sock.sendto(b'D' + chunk_header + chunk_data, (OUTPUT_IP, UNITY_LEFT_PORT))
+
+    def send_frame_right(frame, frame_id=0):
+        _, buffer = cv2.imencode(".jpg", frame)
+        data = buffer.tobytes()
+        total_chunks = (len(data) + CHUNK_SIZE - 1) // CHUNK_SIZE
+        
+        header = struct.pack('!II', frame_id, total_chunks)
+        right_sock.sendto(b'H' + header, (OUTPUT_IP, UNITY_RIGHT_PORT))
+        
+        for i in range(total_chunks):
+            chunk_data = data[i*CHUNK_SIZE:(i+1)*CHUNK_SIZE]
+            chunk_header = struct.pack('!II', frame_id, i)
+            right_sock.sendto(b'D' + chunk_header + chunk_data, (OUTPUT_IP, UNITY_RIGHT_PORT))
+
 def main():
     try:
         cap = setup_camera(camera_index=1)
@@ -302,6 +335,28 @@ def main():
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             
             cv2.imshow('Peg Detection', frame)
+
+            message = {}
+
+             # Transform to world coordinates
+            try:
+                transformed_pos = transform_pegs([(x, y, z)])[0]
+                message[str(peg_id + 1)] = {
+                    "x": round(float(transformed_pos[0]), 3),
+                    "y": round(float(transformed_pos[1]), 3)
+                }
+            except Exception as e:
+                print(f"Error transforming peg {peg_id}: {e}")
+                # Send zero position if transformation fails
+                message[str(peg_id + 1)] = {"x": 0, "y": 0}
+        
+            # Send message to Unity
+            if message:
+                try:
+                    message_json = json.dumps(message)
+                    output_sock.sendto(message_json.encode('utf-8'), (OUTPUT_IP, OUTPUT_PORT))
+                except Exception as e:
+                    print(f"Error sending message: {e}")
             
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
