@@ -1,5 +1,6 @@
 import sys
 import socket
+import time
 from datetime import datetime
 import json
 from typing import List
@@ -181,10 +182,7 @@ class DataReceiver(QtCore.QThread):
                     )
 
                 elif line.startswith("G"):
-                    print("[Receiver] Full Gaze Message Received:", data)
                     data = json.loads(line[1:])
-                    print("[Receiver] Pegs shape:", np.array(data.get("pegs", [])).shape)
-
                     self.full_gaze_received.emit(
                         np.array(data.get("gaze_line")),
                         float(data.get("roi", 0.0)),
@@ -368,19 +366,44 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         right_panel.addWidget(self.gaze_distance_label)
         right_panel.addStretch()
 
+        # === Timer Display ===
+        timer_layout = QtWidgets.QHBoxLayout()
+        
+        # Current recording timer
+        self.timer_label = QtWidgets.QLabel("00:00.000")
+        self.timer_label.setStyleSheet("font-size: 16px; font-weight: bold;")
+        
+        # Last recorded time
+        last_time_layout = QtWidgets.QHBoxLayout()
+        last_time_label = QtWidgets.QLabel("Last Time:")
+        self.last_time_display = QtWidgets.QLabel("00:00.000")
+        self.last_time_display.setStyleSheet("font-size: 14px;")
+        last_time_layout.addWidget(last_time_label)
+        last_time_layout.addWidget(self.last_time_display)
+        last_time_layout.addStretch()
+        
+        # Add to timer layout
+        timer_layout.addWidget(self.timer_label)
+        timer_layout.addStretch()
+        timer_layout.addLayout(last_time_layout)
+        
         # === Recording Controls ===
         self.start_recording_button = QtWidgets.QPushButton("Start Recording")
         self.stop_recording_button = QtWidgets.QPushButton("Stop & Save Recording")
+        self.stop_recording_button.setEnabled(False)
 
         # Recording indicator
         self.record_indicator = QtWidgets.QLabel("● REC")
         self.record_indicator.setStyleSheet("color: red; font-weight: bold;")
         self.record_indicator.hide()
 
+        right_panel.addLayout(timer_layout)
         right_panel.addWidget(self.start_recording_button)
         right_panel.addWidget(self.stop_recording_button)
         right_panel.addWidget(self.record_indicator)
-
+        right_panel.addStretch()
+        
+        # Connect button signals
         self.start_recording_button.clicked.connect(self._start_recording)
         self.stop_recording_button.clicked.connect(self._save_recording)
 
@@ -407,24 +430,33 @@ class GazeTrackingWindow(QtWidgets.QWidget):
 
         # === Throttled Render Timer ===
         self.render_timer = QtCore.QTimer()
-        self.render_timer.setInterval(100)  # 10 FPS
+        self.render_timer.setInterval(60)  # 17 FPS
         self.render_timer.timeout.connect(self.plotter.render)
         self.render_timer.start()
 
         # Timer used to log frames while recording
         self.record_timer = QtCore.QTimer()
-        self.record_timer.setInterval(100)
+        self.record_timer.setInterval(60)
         self.record_timer.timeout.connect(self._log_current_frame)
 
+        # Timer used to update recording time
+        self.recording_timer = QtCore.QTimer()
+        self.recording_timer.timeout.connect(self._update_recording_timer)
+        self.recording_duration = 0.0
+        self.last_recorded_time = 0.0
+        self.record_start_time = None
+
     def set_peg_of_interest(self, index: int):
+        # Store the 0-based index for Python use
         self.peg_of_interest_index = index
         print(f"[GazeTracking] Peg of interest set to: {index}")
         self._update_gaze_line()
 
-        # Optional: Send peg selection to Unity
+        # Send peg selection to Unity (convert to 1-based for C#)
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            message = f'P{index}'  # Prefix with 'P' to indicate peg selection
+            # Convert to 1-based index for C#
+            message = f'P{index + 1}'
             sock.sendto(message.encode('utf-8'), ('127.0.0.1', 9989))  # Match Unity's `listenPort`
             sock.close()
         except Exception as e:
@@ -483,6 +515,18 @@ class GazeTrackingWindow(QtWidgets.QWidget):
         except Exception as e:
             print(f"[GazeTracking] Failed to update visuals: {e}")
 
+    def _format_time(self, seconds):
+        """Format seconds into MM:SS.mmm format."""
+        minutes = int(seconds // 60)
+        seconds = seconds % 60
+        return f"{minutes:02d}:{seconds:06.3f}"
+        
+    def _update_recording_timer(self):
+        """Update the recording timer display."""
+        if self.record_start_time is not None:
+            self.recording_duration = time.time() - self.record_start_time
+            self.timer_label.setText(self._format_time(self.recording_duration))
+    
     def _update_gaze_line(self):
         if self.latest_gaze_line is None or self.latest_pegs is None:
             return
@@ -514,7 +558,9 @@ class GazeTrackingWindow(QtWidgets.QWidget):
             self.disc_actor = self.plotter.add_mesh(self.disc_mesh, color="cyan", opacity=0.5)
 
         # --- 3. Cone ---
-        cone_color = "green" if self.latest_intercept else "red"
+        # Convert intercept to boolean if it's not already
+        is_intercept = bool(self.latest_intercept)
+        cone_color = "green" if is_intercept else "red"
         cone = pv.Cone(center=cone_center, direction=-norm_direction, height=length, radius=DISC_RADIUS)
         if hasattr(self, "cone_mesh"):
             self.cone_mesh.deep_copy(cone)
@@ -538,13 +584,21 @@ class GazeTrackingWindow(QtWidgets.QWidget):
 
         # --- 5. ROI Sphere and Dashed Line to Peg of Interest ---
         peg = pegs[self.peg_of_interest_index]
+        roi_sphere = pv.Sphere(radius=0.02, center=peg, theta_resolution=20, phi_resolution=20)
+
         if hasattr(self, "roi_sphere_mesh"):
-            sphere = pv.Sphere(radius=self.latest_roi, center=peg)
-            self.roi_sphere_mesh.deep_copy(sphere)
+            self.roi_sphere_mesh.deep_copy(roi_sphere)
             self.roi_sphere_mesh.Modified()
         else:
-            self.roi_sphere_mesh = pv.Sphere(radius=self.latest_roi, center=peg)
-            self.roi_sphere_actor = self.plotter.add_mesh(self.roi_sphere_mesh, color="green", opacity=0.2)
+            self.roi_sphere_mesh = roi_sphere
+            self.roi_sphere_actor = self.plotter.add_mesh(
+                self.roi_sphere_mesh, 
+                color="yellow", 
+                opacity=0.15,  # More transparent
+                specular=0.5,  # Add some specular highlight
+                specular_power=15,
+                smooth_shading=True  # Smoother sphere
+            )
 
         def closest_point_on_line(p, a, b):
             ab = b - a
@@ -642,14 +696,27 @@ class GazeTrackingWindow(QtWidgets.QWidget):
     def _save_recording(self):
         self.recorder.stop()
         self.record_timer.stop()
+        self.recording_timer.stop()
         self.record_indicator.hide()
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Recording", "", "JSON Files (*.json)")
         if path:
             self.recorder.save(path)
+            self.last_recorded_time = self.recording_duration
+            self.last_time_display.setText(self._format_time(self.last_recorded_time))
+        
+        # Reset UI state
+        self.start_recording_button.setEnabled(True)
+        self.stop_recording_button.setEnabled(False)
 
     def _start_recording(self):
         self.recorder.start()
         self.record_indicator.show()
+        self.start_recording_button.setEnabled(False)
+        self.stop_recording_button.setEnabled(True)
+        self.recording_duration = 0.0
+        self.timer_label.setText("00:00.000")
+        self.record_start_time = time.time()
+        self.recording_timer.start(50)  # Update every 50ms for smooth display
         self.record_timer.start()
 
     def _log_current_frame(self):
@@ -688,6 +755,7 @@ class PlaybackWindow(QtWidgets.QWidget):
         self.fixation_points = []
         self.current_index = 0
         self.is_playing = False
+        self.intercept_history = []  # Track intercept history for consecutive frames
 
         # === PyVista Plotter ===
         self.plotter = QtInteractor(self)
@@ -698,7 +766,7 @@ class PlaybackWindow(QtWidgets.QWidget):
 
         # === Timer for Playback ===
         self.timer = QtCore.QTimer()
-        self.timer.setInterval(100)  # 100 ms = 10 FPS
+        self.timer.setInterval(60)  # 60 ms = 17 FPS
         self.timer.timeout.connect(self.advance_frame)
 
         # === Viewer Controls ===
@@ -708,9 +776,12 @@ class PlaybackWindow(QtWidgets.QWidget):
         self.fix_view_checkbox = QtWidgets.QCheckBox("Fix View")
         self.fix_view_checkbox.setChecked(False)
 
-        # === Analysis Buttons (stubs for now) ===
-        self.heatmap_button = QtWidgets.QPushButton("Show Heatmap")
+        # === Analysis Buttons ===
+        self.heatmap_button = QtWidgets.QPushButton("Show Fixation Heatmap")
         self.heatmap_button.clicked.connect(self.generate_heatmap)
+        
+        self.gaze_heatmap_button = QtWidgets.QPushButton("Show Gaze Heatmap")
+        self.gaze_heatmap_button.clicked.connect(self.generate_gaze_heatmap)
 
         self.trajectory_checkbox = QtWidgets.QCheckBox("Show Peg Trajectories")
         self.trajectory_checkbox.setChecked(False)
@@ -740,6 +811,7 @@ class PlaybackWindow(QtWidgets.QWidget):
         controls_layout.addWidget(self.zoom_out_button)
         controls_layout.addWidget(self.fix_view_checkbox)
         controls_layout.addWidget(self.heatmap_button)
+        controls_layout.addWidget(self.gaze_heatmap_button)
         controls_layout.addWidget(self.trajectory_checkbox)
         controls_layout.addStretch()
 
@@ -797,15 +869,27 @@ class PlaybackWindow(QtWidgets.QWidget):
     def update_frame(self, idx=None):
         if not self.frames:
             return
+
         if idx is None or not (0 <= idx < len(self.frames)):
             idx = 0
         self.current_index = idx
 
         frame = self.frames[idx]
-        # Track fixation points only if intercept is true
-        if frame["gaze_data"]["intercept"] == 1:
+        
+        # Update intercept history
+        current_intercept = frame["gaze_data"]["intercept"] == 1
+        self.intercept_history.append(current_intercept)
+        
+        # Only keep the last 3 frames of intercept history
+        if len(self.intercept_history) > 3:
+            self.intercept_history.pop(0)
+        
+        # Track fixation points only if we have 3 consecutive frames with intercept true
+        if len(self.intercept_history) >= 3 and all(self.intercept_history[-3:]):
             end_point = np.array(frame["gaze_data"]["gaze_line"][1])  # Point B
-            self.fixation_points.append(end_point)
+            # Only add if this point is different from the last one to avoid duplicates
+            if not self.fixation_points or not np.array_equal(self.fixation_points[-1], end_point):
+                self.fixation_points.append(end_point)
 
         gaze_line = np.array(frame["gaze_data"]["gaze_line"])
         roi = frame["gaze_data"]["roi"]
@@ -813,52 +897,111 @@ class PlaybackWindow(QtWidgets.QWidget):
         peg_data = np.array(frame["peg_data"])
 
         A, B = gaze_line
-        self.plotter.clear()
-        self.plotter.show_axes()
-        self.plotter.show_grid()
-
-        # Gaze Line
-        self.plotter.add_mesh(pv.Line(A, B), color="green", line_width=3)
-
-        # Disc
-        direction = B - A
-        height = float(np.linalg.norm(direction))
-        norm_direction = direction / np.linalg.norm(direction)
-        self.plotter.add_mesh(
-            pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=norm_direction),
-            color="cyan", opacity=0.5
-        )
-
-        # Cone
-        cone_center = A + 0.5 * (B - A)
-        color = "green" if intercept else "red"
-        self.plotter.add_mesh(
-            pv.Cone(center=cone_center, direction=-norm_direction, height=height, radius=DISC_RADIUS),
-            color=color, opacity=0.3
-        )
-
-        # Pegs
-        if peg_data.shape == (6, 3):
-            self.plotter.add_mesh(pv.PolyData(peg_data), color="purple", point_size=12, render_points_as_spheres=True)
-
-        # === Draw peg trajectories if checkbox is checked ===
+        
+        # Only clear and recreate the plotter if it's the first frame
+        if not hasattr(self, '_actors_initialized'):
+            self.plotter.clear()
+            self.plotter.show_axes()
+            self.plotter.show_grid()
+            
+            # Store references to the meshes and actors
+            self.gaze_line_mesh = pv.Line(A, B)
+            self.gaze_line_actor = self.plotter.add_mesh(self.gaze_line_mesh, color="green", line_width=3)
+            
+            # Create disc mesh and actor
+            direction = B - A
+            self.last_direction = direction / np.linalg.norm(direction)
+            self.disc_mesh = pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, normal=self.last_direction)
+            self.disc_actor = self.plotter.add_mesh(
+                self.disc_mesh,
+                color="cyan", opacity=0.5
+            )
+            
+            # Create cone mesh and actor
+            self.cone_center = A + 0.5 * (B - A)
+            self.cone_mesh = pv.Cone(center=self.cone_center, direction=-self.last_direction, 
+                                   height=float(np.linalg.norm(direction)), radius=DISC_RADIUS)
+            self.cone_actor = self.plotter.add_mesh(
+                self.cone_mesh,
+                color="green" if intercept else "red", 
+                opacity=0.3
+            )
+            
+            # Create peg mesh and actor
+            if peg_data.shape == (6, 3):
+                self.peg_mesh = pv.PolyData(peg_data)
+                self.peg_actor = self.plotter.add_mesh(
+                    self.peg_mesh, 
+                    color="purple", 
+                    point_size=12, 
+                    render_points_as_spheres=True
+                )
+            
+            # Create trajectory meshes and actors
+            self.trajectory_meshes = []
+            self.trajectory_actors = []
+            peg_count = len(self.frames[0]["peg_data"])
+            for _ in range(peg_count):
+                mesh = pv.PolyData()
+                self.trajectory_meshes.append(mesh)
+                actor = self.plotter.add_mesh(mesh, color="blue", line_width=3)
+                self.trajectory_actors.append(actor)
+            
+            self._actors_initialized = True
+        else:
+            # Update existing meshes
+            # Update gaze line
+            self.gaze_line_mesh.points = pv.Line(A, B).points
+            
+            # Update disc
+            direction = B - A
+            self.last_direction = direction / np.linalg.norm(direction)
+            self.disc_mesh.points = pv.Disc(center=B, inner=0.0, outer=DISC_RADIUS, 
+                                          normal=self.last_direction).points
+            
+            # Update cone
+            self.cone_center = A + 0.5 * (B - A)
+            self.cone_mesh.points = pv.Cone(
+                center=self.cone_center, 
+                direction=-self.last_direction,
+                height=float(np.linalg.norm(direction)), 
+                radius=DISC_RADIUS
+            ).points
+            
+            # Update cone color based on intercept
+            color = 'green' if intercept else 'red'
+            self.cone_actor.prop.color = color
+            
+            # Update pegs
+            if peg_data.shape == (6, 3) and hasattr(self, 'peg_mesh'):
+                self.peg_mesh.points = peg_data
+        
+        # Update peg trajectories if needed
         if hasattr(self, "trajectory_checkbox") and self.trajectory_checkbox.isChecked():
             peg_count = len(self.frames[0]["peg_data"])
             peg_trails = [[] for _ in range(peg_count)]
 
-            for frame in self.frames:
+            # Only use frames up to current index for trajectory
+            for frame in self.frames[:idx+1]:
                 for i, peg in enumerate(frame["peg_data"]):
                     peg_trails[i].append(peg)
 
             for i, trail in enumerate(peg_trails):
-                trail = np.array(trail)
-                if len(trail) < 2:
-                    continue
-
-                line = pv.Spline(trail, len(trail) * 10)
-                self.plotter.add_mesh(line, color="blue", line_width=3)
-
-        self.plotter.render()
+                if len(trail) >= 2 and i < len(self.trajectory_meshes):
+                    trail_array = np.array(trail)
+                    if len(trail_array.shape) == 2 and trail_array.shape[1] == 3:
+                        # Create a new mesh for the trajectory
+                        spline = pv.Spline(trail_array, len(trail_array) * 10)
+                        # Update the existing mesh points and lines
+                        if len(spline.points) > 0 and len(spline.lines) > 0:
+                            self.trajectory_meshes[i].points = spline.points
+                            self.trajectory_meshes[i].lines = spline.lines
+                            # Force update the actor
+                            self.trajectory_actors[i].mapper.dataset = self.trajectory_meshes[i]
+        
+        # Only render once at the end
+        if hasattr(self, '_actors_initialized'):
+            self.plotter.render()
 
     def generate_heatmap(self):
         if not self.fixation_points:
@@ -891,7 +1034,56 @@ class PlaybackWindow(QtWidgets.QWidget):
         plt.savefig(save_path)
         plt.show()
 
-        print(f"[Heatmap] Heatmap saved to {os.path.abspath(save_path)}")
+        print(f"[Heatmap] Fixation heatmap saved to {os.path.abspath(save_path)}")
+        
+    def generate_gaze_heatmap(self):
+        if not self.frames:
+            QtWidgets.QMessageBox.information(self, "No Data", "No gaze data available.")
+            return
+            
+        import matplotlib.pyplot as plt
+        from scipy.stats import gaussian_kde
+        import os
+        
+        # Extract all gaze end points (tip of the gaze line)
+        gaze_points = []
+        for frame in self.frames:
+            gaze_line = frame["gaze_data"]["gaze_line"]
+            if len(gaze_line) >= 2:  # Ensure we have both start and end points
+                # Get the end point of the gaze line (point B)
+                end_point = np.array(gaze_line[1])
+                gaze_points.append(end_point)
+        
+        if not gaze_points:
+            QtWidgets.QMessageBox.information(self, "No Data", "No valid gaze points found.")
+            return
+            
+        points = np.array(gaze_points)
+        x = points[:, 0]
+        y = points[:, 1]  # Using X-Y plane
+
+        # Kernel density estimate for smooth heatmap
+        xy = np.vstack([x, y])
+        kde = gaussian_kde(xy)
+        
+        # Create grid for the heatmap
+        xi, yi = np.mgrid[x.min():x.max():500j, y.min():y.max():500j]
+        zi = kde(np.vstack([xi.flatten(), yi.flatten()]))
+
+        # Create the plot
+        plt.figure(figsize=(8, 6))
+        plt.title("Gaze Position Heatmap (X-Y Plane)")
+        plt.pcolormesh(xi, yi, zi.reshape(xi.shape), shading="auto", cmap="viridis")
+        plt.colorbar(label="Gaze Density")
+        plt.xlabel("X")
+        plt.ylabel("Y")
+        plt.tight_layout()
+
+        save_path = "gaze_heatmap.png"
+        plt.savefig(save_path)
+        plt.show()
+
+        print(f"[Heatmap] Gaze heatmap saved to {os.path.abspath(save_path)}")
 
     def reset_view(self):
         self.plotter.view_isometric()
@@ -1006,7 +1198,7 @@ class MainWindow(QtWidgets.QWidget):
         )
 
         self.render_timer = QtCore.QTimer()
-        self.render_timer.setInterval(100)  # Adjust to ~10 FPS (100 ms)
+        self.render_timer.setInterval(60)  # Adjust to ~17 FPS (60 ms)
         self.render_timer.timeout.connect(self.plotter.render)
         self.render_timer.start()
 
