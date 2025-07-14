@@ -43,7 +43,7 @@ cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 600)
 class PegStereoMatcher:
     def __init__(self):
         self.max_pegs = 6
-        self.max_missing_frames = 180
+        self.max_missing_frames = 30
         self.position_history_length = 20
         self.movement_threshold = 2.5
         self.new_peg_confirm_frames = 5
@@ -215,7 +215,7 @@ class PegStereoMatcher:
                 last_pos = self.pegs[moving_peg]['position']
                 dist = np.linalg.norm(np.array(pos) - np.array(last_pos))
                 
-                if dist < self.movement_threshold * 6 and dist < min_dist:
+                if dist < self.movement_threshold * 5 and dist < min_dist:
                     min_dist = dist
                     best_match_idx = idx
             
@@ -245,7 +245,7 @@ class PegStereoMatcher:
                 last_pos = self.pegs[peg_id]['position']
                 dist = np.linalg.norm(np.array(pos) - np.array(last_pos))
                 
-                if dist < self.movement_threshold * 6 and dist < min_dist:
+                if dist < self.movement_threshold * 5 and dist < min_dist:
                     min_dist = dist
                     best_match_idx = idx
             
@@ -273,6 +273,38 @@ class PegStereoMatcher:
                     unused_detections.remove(best_match_idx)
                     matched_pegs.add(peg_id)
         
+       # Aggressively reacquire lost pegs using global matching
+        if unused_detections:
+            lost_pegs = [pid for pid in self.pegs if pid not in current_positions]
+            detection_to_peg = {}
+
+            for idx in unused_detections:
+                new_pos = points_3d[idx]
+                best_peg = None
+                best_dist = float('inf')
+
+                for peg_id in lost_pegs:
+                    last_pos = self.pegs[peg_id]['position']
+                    dist = np.linalg.norm(np.array(new_pos) - np.array(last_pos))
+
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_peg = peg_id
+
+                # Assign detection to best-matching lost peg
+                if best_peg is not None and best_peg not in detection_to_peg.values():
+                    detection_to_peg[idx] = best_peg
+
+            # Apply reacquisitions
+            for idx, peg_id in detection_to_peg.items():
+                new_pos = points_3d[idx]
+                self.pegs[peg_id]['position'] = new_pos
+                self.pegs[peg_id]['history'].append(new_pos)
+                self.pegs[peg_id]['missing_frames'] = 0
+                current_positions[peg_id] = new_pos
+                if idx in unused_detections:
+                    unused_detections.remove(idx)
+
         # Handle any remaining detections (new pegs or lost pegs) - only if no moving peg
         if self.moving_peg_id is None:
             for idx in unused_detections:
@@ -280,6 +312,8 @@ class PegStereoMatcher:
                 
                 # Only add new pegs if we're below max_pegs and position is valid
                 if len(current_positions) < self.max_pegs and self._is_valid_peg_position(pos, current_positions.values()):
+                    if self.next_peg_id >= self.max_pegs:
+                        continue
                     peg_id = self.next_peg_id
                     self.pegs[peg_id] = {
                         'position': pos,
@@ -335,11 +369,8 @@ class PegStereoMatcher:
         
         # Remove missing pegs
         for peg_id in missing_pegs:
-            del self.pegs[peg_id]
-            if peg_id in self.stable_positions:
-                del self.stable_positions[peg_id]
-            if peg_id == self.moving_peg_id:
-                self.moving_peg_id = None
+            if peg_id not in current_positions and peg_id in self.pegs:
+                current_positions[peg_id] = self.pegs[peg_id]['position']
         
         # If we have a moving peg but it's not in current positions, clear it
         if self.moving_peg_id is not None and self.moving_peg_id not in current_positions:
