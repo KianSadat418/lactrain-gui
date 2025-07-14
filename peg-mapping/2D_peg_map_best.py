@@ -3,18 +3,22 @@ import numpy as np
 import socket
 import math
 from ultralytics import YOLO
+import time
+import json
 
 import os
 # Set environment variable to handle OpenMP runtime warning
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
-UNITY_LEFT_PORT = 9998
-UNITY_RIGHT_PORT = 9999
-OUTPUT_PORT = 9989
+# Ports for receiving data from Unity
+UNITY_LEFT_PORT = 9991
+UNITY_RIGHT_PORT = 9992
+
+# Port for sending data to Unity
+UNITY_RECEIVE_PORT = 9989  # This should match the sendPort in Unity
 OUTPUT_IP = "127.0.0.1"
 
-left_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-right_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+# Socket for sending data to Unity
 output_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 model = YOLO("C:\\Users\\kiansadat\\Desktop\\Azimi Project\\3D Eye Gaze\\Assets\\Scripts\\Peg-Detection-Scripts\\Training-05-22\\result\\content\\runs\\detect\\yolo8_peg_detector\\weights\\best.pt")
@@ -32,22 +36,19 @@ def setup_camera(camera_index=1, width=800, height=600):
     return cap
 
 class PegTracker:
-    def __init__(self, max_pegs=6, movement_threshold=5, still_frames=10, max_speed=150):
+    def __init__(self, max_pegs=6, movement_threshold=5, still_frames=10, max_speed=150, max_occlusion_frames=30):
         self.max_pegs = max_pegs
         self.movement_threshold = movement_threshold
         self.still_frames = still_frames
-        self.max_speed = max_speed  # Maximum expected pixels/frame for a moving peg
+        self.max_speed = max_speed
+        self.max_occlusion_frames = max_occlusion_frames
         
         # Track pegs and their states
-        self.pegs = [None] * max_pegs  # Current positions
-        self.last_positions = [None] * max_pegs  # Last known positions
-        self.frames_since_seen = [0] * max_pegs  # Frames since each peg was seen
-        self.frames_since_move = [0] * max_pegs  # Frames since each peg moved
+        self.peg_positions = [None] * max_pegs  # Current positions of pegs (None if not detected)
+        self.peg_confidences = [0.0] * max_pegs  # Confidence scores for each peg
+        self.frames_since_seen = [self.max_occlusion_frames] * max_pegs  # Frames since each peg was seen
         self.velocities = [(0, 0)] * max_pegs  # Current velocity (dx, dy) per peg
-        self.is_moving = False
-        self.moving_peg_idx = -1
-        self.frame_count = 0
-        self.peg_history = [[] for _ in range(max_pegs)]  # History of positions for each peg
+        self.moving_peg_idx = -1  # Index of the currently moving peg (-1 if none)
 
     def distance(self, pos1, pos2):
         return math.sqrt((pos1[0]-pos2[0])**2 + (pos1[1]-pos2[1])**2)
@@ -91,181 +92,85 @@ class PegTracker:
         return closest_peg, min_dist
 
     def update(self, frame):
-        self.frame_count += 1
-        
-        # Get detections with confidence scores
+        # Get detections from YOLO
         results = model(frame, verbose=False)[0]
-        current_detections = self.get_center(results)
         
-        # Convert to list of (x,y) tuples, sorted by confidence
-        current_pegs = [(x, y) for x, y, _ in current_detections[:self.max_pegs * 2]]  # Allow some extra detections
+        # Get current detections with confidence scores
+        current_detections = []
+        for box in results.boxes:
+            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+            conf = float(box.conf[0].cpu().numpy())
+            x = float((x1 + x2) / 2)
+            y = float((y1 + y2) / 2)
+            current_detections.append((x, y, conf))
         
-        # Initialize pegs if first frame with enough detections
-        if not any(self.pegs) and len(current_pegs) >= self.max_pegs:
-            for i in range(self.max_pegs):
-                if i < len(current_pegs):
-                    self.pegs[i] = current_pegs[i]
-                    self.last_positions[i] = current_pegs[i]
-            return self.pegs.copy()
+        # Sort detections by confidence (highest first)
+        current_detections.sort(key=lambda d: d[2], reverse=True)
         
-        # If we don't have pegs yet, return empty list
-        if not any(self.pegs):
-            return []
-            
-        # Every 30 frames, try to reinitialize any missing pegs
-        if self.frame_count % 30 == 0 and len(current_pegs) >= self.max_pegs:
-            missing_pegs = [i for i, p in enumerate(self.pegs) if p is None]
-            if missing_pegs and len(current_pegs) >= len(missing_pegs):
-                # Sort missing pegs by their last known position (top to bottom, left to right)
-                # This helps maintain consistent IDs
-                missing_pegs.sort(key=lambda i: (self.peg_history[i][-1][1], self.peg_history[i][-1][0]) 
-                                if self.peg_history[i] else (float('inf'), float('inf')))
-                
-                # Sort current detections by position (top to bottom, left to right)
-                current_sorted = sorted(current_pegs, key=lambda p: (p[1], p[0]))
-                
-                for i, idx in enumerate(missing_pegs):
-                    if i < len(current_sorted):
-                        self.pegs[idx] = current_sorted[i]
-                        self.last_positions[idx] = current_sorted[i]
-                        self.frames_since_seen[idx] = 0
-                        self.velocities[idx] = (0, 0)
-                        if idx < len(self.peg_history):
-                            self.peg_history[idx].append(current_sorted[i])
-                        else:
-                            self.peg_history.append([current_sorted[i]])
+        # If this is the first frame with detections, initialize all pegs
+        if not any(self.peg_positions) and len(current_detections) >= self.max_pegs:
+            for i in range(min(self.max_pegs, len(current_detections))):
+                x, y, conf = current_detections[i]
+                self.peg_positions[i] = (x, y)
+                self.peg_confidences[i] = conf
+                self.frames_since_seen[i] = 0
+            return [p for p in self.peg_positions if p is not None]
         
-        # Find the best match for each peg with prediction
-        matched = [False] * len(current_pegs)
-        new_positions = [None] * self.max_pegs
+        # Track which detections have been matched to existing pegs
+        matched_detections = [False] * len(current_detections)
         
-        # First, try to match each peg to the closest detection with prediction
+        # First pass: Update positions of pegs that are currently detected
         for i in range(self.max_pegs):
-            if self.pegs[i] is None:
+            if self.peg_positions[i] is None:
                 continue
                 
-            min_dist = float('inf')
-            best_match = -1
+            best_match = None
+            best_dist = float('inf')
             
-            # Predict next position based on velocity
-            predicted_x = self.pegs[i][0] + self.velocities[i][0]
-            predicted_y = self.pegs[i][1] + self.velocities[i][1]
-            
-            for j, (x, y) in enumerate(current_pegs):
-                if matched[j]:
+            # Find the closest detection to this peg's last known position
+            for j, (x, y, conf) in enumerate(current_detections):
+                if matched_detections[j]:
                     continue
+                    
+                dist = self.distance(self.peg_positions[i], (x, y))
                 
-                # Calculate distance to predicted position
-                dist = self.distance((predicted_x, predicted_y), (x, y))
-                
-                # Also consider direct distance for slow movements
-                direct_dist = self.distance(self.pegs[i], (x, y))
-                dist = min(dist, direct_dist)
-                
-                if dist < min_dist and dist < self.max_speed * 1.5:  # Allow some margin over max speed
-                    min_dist = dist
+                # Only consider detections within max_speed distance
+                if dist < best_dist and dist < self.max_speed * 2:
+                    best_dist = dist
                     best_match = j
             
-            if best_match != -1:
-                new_positions[i] = current_pegs[best_match]
-                matched[best_match] = True
-                self.frames_since_seen[i] = 0  # Reset not seen counter
-                
-                # Update velocity (simple low-pass filter)
-                dx = (new_positions[i][0] - self.pegs[i][0]) * 0.3
-                dy = (new_positions[i][1] - self.pegs[i][1]) * 0.3
-                self.velocities[i] = (dx, dy)
+            if best_match is not None:
+                # Update peg position and confidence
+                x, y, conf = current_detections[best_match]
+                self.peg_positions[i] = (x, y)
+                self.peg_confidences[i] = conf
+                self.frames_since_seen[i] = 0
+                matched_detections[best_match] = True
             else:
-                # If no match found, increment not seen counter
+                # Peg not detected in this frame
                 self.frames_since_seen[i] += 1
-                
-                # If not seen for too long, mark for reinitialization
-                if self.frames_since_seen[i] > 30:  # ~1 second at 30fps
-                    # Keep the last known position in history
-                    if self.pegs[i] is not None and i < len(self.peg_history):
-                        self.peg_history[i].append(self.pegs[i])
-                    self.pegs[i] = None
-                    self.velocities[i] = (0, 0)
         
-        # Check for movement using velocity
-        movement_detected = False
-        moving_peg = -1
-        max_speed = 0
+        # Second pass: Handle unmatched detections (new pegs or false positives)
+        for j, matched in enumerate(matched_detections):
+            if not matched and current_detections[j][2] > 0.5:  # Only consider high confidence detections
+                # Find the first empty peg slot
+                for i in range(self.max_pegs):
+                    if self.peg_positions[i] is None:
+                        x, y, conf = current_detections[j]
+                        self.peg_positions[i] = (x, y)
+                        self.peg_confidences[i] = conf
+                        self.frames_since_seen[i] = 0
+                        break
         
+        # Handle occlusions and missing pegs
         for i in range(self.max_pegs):
-            if self.pegs[i] is None:
-                continue
-                
-            if new_positions[i] is None:
-                continue
-                
-            # Calculate speed (pixels/frame)
-            speed = self.distance((0, 0), self.velocities[i])
-            
-            if speed > self.movement_threshold and speed > max_speed:
-                movement_detected = True
-                max_speed = speed
-                moving_peg = i
+            if self.peg_positions[i] is not None and self.frames_since_seen[i] > self.max_occlusion_frames:
+                # Peg has been occluded for too long, mark as missing
+                self.peg_positions[i] = None
+                self.peg_confidences[i] = 0.0
         
-        # If we detect movement and no peg is currently moving, start tracking movement
-        if movement_detected and not self.is_moving:
-            self.is_moving = True
-            self.moving_peg_idx = moving_peg
-        
-        # If we're tracking a moving peg
-        if self.is_moving and self.moving_peg_idx != -1:
-            # Only update the moving peg's position
-            if new_positions[self.moving_peg_idx] is not None:
-                self.pegs[self.moving_peg_idx] = new_positions[self.moving_peg_idx]
-            
-            # Check if movement has stopped (peg has been still for N frames)
-            if max_speed < self.movement_threshold:
-                self.frames_since_move[self.moving_peg_idx] += 1
-                if self.frames_since_move[self.moving_peg_idx] > self.still_frames:
-                    self.is_moving = False
-                    self.moving_peg_idx = -1
-            else:
-                self.frames_since_move[self.moving_peg_idx] = 0
-        else:
-            # No movement detected, update all pegs
-            for i in range(self.max_pegs):
-                if new_positions[i] is not None:
-                    self.pegs[i] = new_positions[i]
-                    
-        # Try to match any unmatched detections to missing pegs
-        unmatched_dets = [j for j, m in enumerate(matched) if not m and j < len(current_pegs)]
-        missing_pegs = [i for i, p in enumerate(self.pegs) if p is None]
-        
-        if unmatched_dets and missing_pegs:
-            # Sort missing pegs by their last known position
-            missing_pegs.sort(key=lambda i: (self.peg_history[i][-1][1], self.peg_history[i][-1][0]) 
-                            if self.peg_history[i] else (float('inf'), float('inf')))
-            
-            # Sort unmatched detections by position
-            unmatched_positions = sorted([current_pegs[j] for j in unmatched_dets], 
-                                       key=lambda p: (p[1], p[0]))
-            
-            # Assign closest matches based on position
-            for i, peg_idx in enumerate(missing_pegs):
-                if i < len(unmatched_positions):
-                    self.pegs[peg_idx] = unmatched_positions[i]
-                    self.velocities[peg_idx] = (0, 0)
-                    self.frames_since_seen[peg_idx] = 0
-                    if peg_idx < len(self.peg_history):
-                        self.peg_history[peg_idx].append(unmatched_positions[i])
-                    else:
-                        self.peg_history.append([unmatched_positions[i]])
-        
-        return [p for p in self.pegs if p is not None]
-
-    def transform_pegs(pegs):
-        """Transform 3D points from camera coordinates to world coordinates."""
-        transformed_pegs = []
-        for x, y in pegs:
-            p = np.array([x, y, 1.0])
-            p_transformed = transformation_matrix @ p
-            transformed_pegs.append(p_transformed[:2])
-        return transformed_pegs
+        # Return only the positions of currently visible pegs
+        return [p for p in self.peg_positions if p is not None]
 
     def send_frame_left(frame, frame_id=0):
         _, buffer = cv2.imencode(".jpg", frame)
@@ -293,73 +198,112 @@ class PegTracker:
             chunk_header = struct.pack('!II', frame_id, i)
             right_sock.sendto(b'D' + chunk_header + chunk_data, (OUTPUT_IP, UNITY_RIGHT_PORT))
 
+def transform_pegs(pegs):
+        """Transform 3D points from camera coordinates to world coordinates."""
+        transformed_pegs = []
+        for x, y in pegs:
+            p = np.array([x, y, 1.0])
+            p_transformed = transformation_matrix @ p
+            transformed_pegs.append(p_transformed[:2])
+        return transformed_pegs
+
 def main():
     try:
-        cap = setup_camera(camera_index=1)
-        # Adjusted parameters for better fast movement tracking
-        detector = PegTracker(
-            movement_threshold=5,  # Lower threshold to detect movement earlier
-            still_frames=10,       # Shorter still time to resume tracking faster
-            max_speed=150          # Higher max speed for fast movements
+        # Initialize camera with 640x480 resolution (as detected by res_check.py)
+        cap = setup_camera(camera_index=1, width=640, height=480)
+        
+        # Initialize the PegTracker with optimized parameters
+        tracker = PegTracker(
+            max_pegs=6,               # We're tracking exactly 6 pegs
+            movement_threshold=3,      # Lower threshold for better movement detection
+            still_frames=5,            # Fewer frames to confirm peg is stationary
+            max_speed=200,             # Higher max speed for fast movements
+            max_occlusion_frames=45    # Keep track of occluded pegs for 1.5 seconds at 30fps
         )
         
         # For FPS calculation
-        prev_time = 0
+        prev_time = time.time()
         fps = 0
+        frame_count = 0
         
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
-                break   
+                print("Failed to grab frame")
+                break
             
             # Process frame
-            pegs = detector.update(frame)
+            pegs = tracker.update(frame)
             
-            # Draw pegs
-            for i, (x, y) in enumerate(pegs):
-                # Draw circle
-                cv2.circle(frame, (int(x), int(y)), 8, (0, 255, 0), 2)
-                # Draw peg number
-                cv2.putText(frame, str(i+1), (int(x) - 5, int(y) + 5), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+            # # Draw pegs with visual feedback
+            # for i, pos in enumerate(tracker.peg_positions):
+            #     if pos is not None:
+            #         x, y = pos
+            #         # Draw circle (green for visible, blue for recently occluded)
+            #         color = (0, 255, 0) if tracker.frames_since_seen[i] == 0 else (255, 165, 0)  # Green or orange
+            #         cv2.circle(frame, (int(x), int(y)), 10, color, 2)
+            #         # Draw peg number and confidence
+            #         cv2.putText(frame, f"{i+1}", (int(x) - 5, int(y) + 5), 
+            #                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            #         cv2.putText(frame, f"{tracker.peg_confidences[i]:.1f}", 
+            #                    (int(x) + 10, int(y) + 10), 
+            #                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
             
-            # Calculate and display FPS
-            current_time = time.time()
-            fps = 0.9 * fps + 0.1 * (1 / (current_time - prev_time)) if prev_time > 0 else 0
-            prev_time = current_time
+            # # Calculate and display FPS
+            # current_time = time.time()
+            # frame_count += 1
+            # if frame_count % 10 == 0:  # Update FPS every 10 frames
+            #     fps = 10 / (current_time - prev_time) if prev_time > 0 else 0
+            #     prev_time = current_time
             
-            # Display FPS and peg count
-            cv2.putText(frame, f'FPS: {fps:.1f}', (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(frame, f'Pegs: {len(pegs)}/6', (10, 60), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            # # Display FPS and peg count
+            # visible_pegs = sum(1 for p in tracker.peg_positions if p is not None)
+            # cv2.putText(frame, f'FPS: {fps:.1f}', (10, 30), 
+            #            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            # cv2.putText(frame, f'Visible: {visible_pegs}/6', (10, 60), 
+            #            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             
-            cv2.imshow('Peg Detection', frame)
+            # # Show the frame with detections
+            # cv2.imshow('Peg Detection', frame)
 
+            # Prepare message for Unity
             message = {}
-
-             # Transform to world coordinates
             try:
-                transformed_pos = transform_pegs([(x, y, z)])[0]
-                message[str(peg_id + 1)] = {
-                    "x": round(float(transformed_pos[0]), 3),
-                    "y": round(float(transformed_pos[1]), 3)
-                }
+                # Only send positions for pegs that are currently visible
+                visible_pegs = [p for p in tracker.peg_positions if p is not None]
+                if visible_pegs:
+                    transformed = transform_pegs(visible_pegs)
+                    for peg_id, pos in enumerate(transformed):
+                        message[str(peg_id + 1)] = {
+                            "x": round(float(pos[0]), 3),
+                            "y": round(float(pos[1]), 3),
+                        }
+                
+                # Also include occluded pegs with their last known positions
+                for i, pos in enumerate(tracker.peg_positions):
+                    if pos is None and tracker.frames_since_seen[i] < tracker.max_occlusion_frames:
+                        message[str(i + 1)] = {
+                            "x": round(float(tracker.peg_positions[i][0]), 3) if tracker.peg_positions[i] else 0,
+                            "y": round(float(tracker.peg_positions[i][1]), 3) if tracker.peg_positions[i] else 0,
+                        }
+            
             except Exception as e:
-                print(f"Error transforming peg {peg_id}: {e}")
-                # Send zero position if transformation fails
-                message[str(peg_id + 1)] = {"x": 0, "y": 0}
+                print(f"Error preparing message: {e}")
         
             # Send message to Unity
             if message:
                 try:
                     message_json = json.dumps(message)
-                    output_sock.sendto(message_json.encode('utf-8'), (OUTPUT_IP, OUTPUT_PORT))
+                    output_sock.sendto(message_json.encode('utf-8'), (OUTPUT_IP, UNITY_RECEIVE_PORT))
+                    if frame_count % 10 == 0:  # Only print every 10 frames to reduce console spam
+                        print(f"[Python] Sent data for {len([m for m in message.values()])} visible pegs")
                 except Exception as e:
                     print(f"Error sending message: {e}")
             
+            # Check for quit command
             key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
+            if key == ord('q') or key == 27:  # 'q' or ESC to quit
+                print("Exiting...")
                 break
 
     except Exception as e:
