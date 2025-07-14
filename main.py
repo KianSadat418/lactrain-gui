@@ -190,6 +190,16 @@ class DataReceiver(QtCore.QThread):
                         float(data.get("gaze_distance", 0.0)),
                         np.array(data.get("pegs", []))
                     )
+                elif line.startswith("D"):
+                    data = json.loads(line[1:])
+                    print(f"[DEBUG] Received D data: {data}")  # Debug statement
+                    self.full_gaze_received.emit(
+                        np.array(data.get("gaze_position")),
+                        float(data.get("roi", 0.0)),
+                        int(data.get("intercept", 0)),
+                        float(data.get("gaze_distance", 0.0)),
+                        np.array(data.get("pegs", []))
+                    )
 
                 else:
                     raw = json.loads(line)
@@ -1715,14 +1725,14 @@ class MainWindow(QtWidgets.QWidget):
 class MainMenuWindow(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Mixed Reality Surgical Training System")
+        self.setWindowTitle("Mixed Reality Surgical Training System 3D")
         self.setMinimumSize(400, 300)
 
         layout = QtWidgets.QVBoxLayout()
 
         # Info Label
         info_label = QtWidgets.QLabel(
-            "<h2>Welcome to the Surgical Training GUI</h2>"
+            "<h2>Welcome to the Surgical Training GUI 3D</h2>"
             "<p>Select a mode to begin:</p>"
         )
         info_label.setAlignment(QtCore.Qt.AlignCenter)
