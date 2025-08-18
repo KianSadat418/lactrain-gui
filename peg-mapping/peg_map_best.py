@@ -4,6 +4,7 @@ import socket
 import os
 import json
 import struct
+import time
 from ultralytics import YOLO
 from collections import deque
 import itertools
@@ -40,346 +41,303 @@ cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1600)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 600)
 
+# ---------- helpers: low-latency smoothing + 3D constant-velocity KF ----------
+class OneEuro3D:
+    def __init__(self, freq=120.0, min_cutoff=1.0, beta=0.02, d_cutoff=1.0):
+        self.freq=freq; self.min_cutoff=min_cutoff; self.beta=beta; self.d_cutoff=d_cutoff
+        self.t_prev=None; self.x_prev=None; self.dx_prev=None
+    @staticmethod
+    def _alpha(cutoff, dt):
+        tau = 1.0/(2*np.pi*cutoff)
+        return 1.0/(1.0 + tau/dt)
+    def filter(self, x, t):
+        x=np.asarray(x, dtype=float)
+        if self.t_prev is None:
+            self.t_prev=t; self.x_prev=x.copy(); self.dx_prev=np.zeros_like(x); return x
+        dt=max(1e-6, t-self.t_prev); self.t_prev=t
+        dx=(x-self.x_prev)/dt
+        alpha_d=self._alpha(self.d_cutoff, dt)
+        dx_hat=alpha_d*dx + (1-alpha_d)*self.dx_prev
+        cutoff=self.min_cutoff + self.beta*np.linalg.norm(dx_hat)
+        alpha=self._alpha(cutoff, dt)
+        x_hat=alpha*x + (1-alpha)*self.x_prev
+        self.x_prev=x_hat; self.dx_prev=dx_hat
+        return x_hat
+
+class Kalman3D:
+    """6D state [x y z vx vy vz] with constant-velocity dynamics."""
+    def __init__(self, q_pos=1e-4, q_vel=1e-3, r_meas=2e-4):
+        self.x=np.zeros((6,1))
+        self.P=np.eye(6)*1e-3
+        self.Q=np.diag([q_pos,q_pos,q_pos,q_vel,q_vel,q_vel])
+        self.R=np.eye(3)*r_meas
+        self.F=np.eye(6)
+        self.H=np.zeros((3,6)); self.H[0,0]=self.H[1,1]=self.H[2,2]=1.0
+    def predict(self, dt):
+        self.F=np.eye(6); self.F[0,3]=self.F[1,4]=self.F[2,5]=dt
+        self.x=self.F@self.x
+        self.P=self.F@self.P@self.F.T + self.Q
+    def update(self, z):
+        z=np.asarray(z, dtype=float).reshape(3,1)
+        y=z - self.H@self.x
+        S=self.H@self.P@self.H.T + self.R
+        K=self.P@self.H.T@np.linalg.inv(S)
+        self.x=self.x + K@y
+        self.P=(np.eye(6) - K@self.H)@self.P
+    def pos(self): return self.x[:3,0].copy()
+    def vel(self): return self.x[3:,0].copy()
+
+# --------------------------- DROP-IN REPLACEMENT ---------------------------
 class PegStereoMatcher:
+    """
+    Fixes for your tracker:
+    - Initializes deterministically (left->right) when 6 pegs are visible.
+    - Per-peg 3D Kalman + OneEuro smoothing.
+    - Gated association: all static pegs use a tight gate; ONE moving token uses a wide gate.
+    - When a static peg is occluded, we keep publishing its last stable pose (no swapping).
+    - 2-frame publish guard to kill one-frame pops.
+    """
     def __init__(self):
         self.max_pegs = 6
-        self.max_missing_frames = 30
+
+        # existing knobs you had; I'll reuse them for scale
+        self.movement_threshold = 2.5   # "mm" scale used elsewhere in your code
         self.position_history_length = 20
-        self.movement_threshold = 2.5
-        self.new_peg_confirm_frames = 5
-        self.moving_peg_cooldown = 10 # Increased cooldown for more stable tracking
-        self.min_peg_distance = 1.0  # Increased minimum distance between pegs (mm)
+        self.max_missing_frames = 30
 
-        
-        self.potential_pegs = {}
+        # new, derived thresholds (tuned for your scale)
+        self.gate_static = self.movement_threshold * 6.0    # ~15
+        self.gate_moving = self.movement_threshold * 20.0   # ~50
+        self.publish_guard_radius = 5.0                     # mm-ish
+        self.speed_on  = 0.020   # m/s-ish in your units (we only compare relative)
+        self.speed_off = 0.010
+        self.token_on_frames  = 3
+        self.token_off_frames = 6
+
+        # state
+        self.pegs = {}                 # id -> dict(track state)
+        self.stable_positions = {}     # id -> last "settled" pos
+        self.initialized = False
         self.next_peg_id = 0
-        self.last_moving_peg_change = 0
         self.frame_count = 0
-        self.pegs = {}
-        self.stable_positions = {}  # Last known stable positions
-        self.moving_peg_id = None  # ID of the currently moving peg
+        self.moving_peg_id = None
+        self.last_moving_peg_change = 0
+        self._t_prev = time.perf_counter()
 
+    # --------------------------- detection helpers -------------------------
     def get_center(self, results):
         if len(results.boxes) == 0:
             return []
-        
-        pegs = []
+        out=[]
         for box in results.boxes:
-            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-            x = float((x1 + x2) / 2)
-            y = float((y1 + y2) / 2)
-            pegs.append([x, y])
-        return pegs
-    
+            x1,y1,x2,y2 = box.xyxy[0].cpu().numpy()
+            out.append([float((x1+x2)/2.0), float((y1+y2)/2.0)])
+        return out
+
     def find_3d_points(self, left_points, right_points):
-        points_3d = []
+        pts=[]
         for pt_left, pt_right in zip(left_points, right_points):
-            pts_left = np.array(pt_left).reshape(2, 1)
-            pts_right = np.array(pt_right).reshape(2, 1)
-            
-            point_4d = cv2.triangulatePoints(P1, P2, pts_left, pts_right)
-            point_3d = point_4d[:3] / point_4d[3]
-            x, y, z = point_3d[:, 0]
-            points_3d.append((x + baseline_offset, -y, z))
-            
-        return points_3d
-    
+            pl = np.array(pt_left).reshape(2,1)
+            pr = np.array(pt_right).reshape(2,1)
+            X4 = cv2.triangulatePoints(P1, P2, pl, pr)
+            X3 = X4[:3]/(X4[3]+1e-12)
+            x,y,z = X3[:,0]
+            pts.append((x + baseline_offset, -y, z))
+        return pts
+
     def find_pairs(self, left_points, right_points):
         if not left_points or not right_points:
             return [], []
-            
-        if len(left_points) == 6 and len(right_points) == 6:
+        # Try exact match when we have 6 & 6 (like your code)
+        if len(left_points)==6 and len(right_points)==6:
             all_pairings = [list(zip(left_points, perm)) for perm in itertools.permutations(right_points)]
-            
             for pairings in all_pairings:
-                valid = True
-                left_matched = []
-                right_matched = []
-                
-                for left_pt, right_pt in pairings:
-                    if abs(left_pt[1] - right_pt[1]) > 15.0:
-                        valid = False
-                        break
-                    left_matched.append(left_pt)
-                    right_matched.append(right_pt)
-                
+                valid=True; L=[]; R=[]
+                for lp, rp in pairings:
+                    if abs(lp[1]-rp[1]) > 20.0:   # relaxed a bit
+                        valid=False; break
+                    L.append(lp); R.append(rp)
                 if valid:
-                    points_3d = self.find_3d_points(left_matched, right_matched)
-                    if all(0 <= p[2] <= 200 for p in points_3d):
-                        return left_matched, right_matched
-        
+                    pts3d=self.find_3d_points(L,R)
+                    if all(0 <= p[2] <= 200 for p in pts3d):
+                        return L,R
+        # fallback greedy
         return self.find_pairs_simple(left_points, right_points)
-    
+
     def find_pairs_simple(self, left_points, right_points):
-        result_pairs_right = []
-        result_pairs_left = []
-        
+        usedL=set(); usedR=set(); L=[]; R=[]
         for i in range(len(left_points)):
             for j in range(len(right_points)):
-                if (right_points[j] in result_pairs_right or 
-                    left_points[i] in result_pairs_left):
+                if i in usedL or j in usedR: continue
+                lp = left_points[i]; rp = right_points[j]
+                if abs(lp[1]-rp[1]) > 20.0:   # relaxed
                     continue
-                
-                left_x = left_points[i]
-                right_x = right_points[j]
-                
-                if abs(left_x[1] - right_x[1]) > 10.0:
-                    continue
-                
-                point_in_3d = self.find_3d_points([left_x], [right_x])[0]
-                if 0 <= point_in_3d[2] <= 200:
-                    result_pairs_left.append(left_x)
-                    result_pairs_right.append(right_x)
-        
-        return result_pairs_left, result_pairs_right
-    
-    def update(self, left_frame, right_frame):
-        # Get detections
-        res_l = model(left_frame, verbose=False)[0]
-        res_r = model(right_frame, verbose=False)[0]
-        
-        left_pegs = self.get_center(res_l)
-        right_pegs = self.get_center(res_r)
-        
-        # Find matching pairs
-        matched_left, matched_right = self.find_pairs(left_pegs, right_pegs)
-        
-        if not matched_left or not matched_right:
-            return self._get_current_positions()
-        
-        # Get 3D positions
-        points_3d = self.find_3d_points(matched_left, matched_right)
-        
-        # Update tracking
-        self._update_peg_positions(points_3d)
-        
-        return self._get_current_positions()
-    
-    def _find_moving_peg(self, current_positions):
-        """Identify which peg is moving based on the 'only one moves' constraint"""
-        if not self.stable_positions or not current_positions:
-            return None
-            
-        max_movement = 0
-        moving_id = None
-        movements = {}
-        
-        # Calculate movement for all pegs
-        for peg_id, pos in current_positions.items():
-            if peg_id in self.stable_positions:
-                movement = np.linalg.norm(np.array(pos) - np.array(self.stable_positions[peg_id]))
-                movements[peg_id] = movement
-                if movement > max_movement:
-                    max_movement = movement
-                    moving_id = peg_id
-        
-        # Only return a moving peg if its movement is significantly more than others
-        if max_movement > self.movement_threshold * 1.5:  # 1.5x threshold for more confidence
-            # Check if this peg's movement is at least 2x the next highest movement
-            other_movements = [m for pid, m in movements.items() if pid != moving_id]
-            if not other_movements or max_movement > 2 * max(other_movements, default=0):
-                return moving_id
-        
-        return None
+                p3 = self.find_3d_points([lp],[rp])[0]
+                if 0 <= p3[2] <= 200:
+                    usedL.add(i); usedR.add(j); L.append(lp); R.append(rp)
+        return L,R
 
-    def _is_valid_peg_position(self, position, existing_positions, min_distance=15.0):
-        """Check if a new peg position is valid (not too close to existing ones)"""
-        for existing_pos in existing_positions:
-            if np.linalg.norm(np.array(position) - np.array(existing_pos)) < min_distance:
-                return False
+    # --------------------------- core tracking ------------------------------
+    def _init_tracks(self, points_3d):
+        """Initialize 6 IDs deterministically left->right when we first see 6 pegs."""
+        if len(points_3d) < self.max_pegs:
+            return False
+        points_3d = sorted(points_3d, key=lambda p: p[0])[:self.max_pegs]
+        self.pegs = {}
+        tnow = time.perf_counter()
+        for pid, pos in enumerate(points_3d):
+            kf = Kalman3D(); kf.x[:3,0] = np.array(pos).reshape(3)
+            eu = OneEuro3D(freq=120.0, min_cutoff=1.0, beta=0.02, d_cutoff=1.0)
+            self.pegs[pid] = {
+                'position': tuple(pos),     # last published (after guard)
+                'kf': kf,
+                'euro': eu,
+                'pub_buffer': deque(maxlen=3),
+                'missing_frames': 0,
+                'moving_frames': 0,
+                'static_frames': 0,
+                'last_update_t': tnow
+            }
+        self.stable_positions = {pid: self.pegs[pid]['position'] for pid in self.pegs}
+        self.next_peg_id = self.max_pegs
+        self.initialized = True
+        self.moving_peg_id = None
+        self.last_moving_peg_change = self.frame_count
         return True
 
-    def _update_peg_positions(self, points_3d):
-        current_positions = {}
-        
-        # Get current stable positions if we don't have them yet
-        if not self.stable_positions and self.pegs:
-            self.stable_positions = {pid: data['position'] for pid, data in self.pegs.items()}
-        
-        # First, try to match existing pegs to new detections
-        unused_detections = list(range(len(points_3d)))
-        matched_pegs = set()
-        
-        # Sort peg IDs to maintain consistent ordering
-        peg_ids = sorted(self.pegs.keys())
-        
-        # Check if we should be tracking a moving peg
-        if self.moving_peg_id is not None and self.moving_peg_id in self.pegs:
-            moving_peg = self.moving_peg_id
-            best_match_idx = None
-            min_dist = float('inf')
-            
-            # Find the best match for the moving peg
-            for idx in unused_detections:
-                pos = points_3d[idx]
-                last_pos = self.pegs[moving_peg]['position']
-                dist = np.linalg.norm(np.array(pos) - np.array(last_pos))
-                
-                if dist < self.movement_threshold * 5 and dist < min_dist:
-                    min_dist = dist
-                    best_match_idx = idx
-            
-            if best_match_idx is not None:
-                # Update the moving peg's position
-                pos = points_3d[best_match_idx]
-                self.pegs[moving_peg]['position'] = pos
-                self.pegs[moving_peg]['history'].append(pos)
-                if len(self.pegs[moving_peg]['history']) > self.position_history_length:
-                    self.pegs[moving_peg]['history'].popleft()
-                self.pegs[moving_peg]['missing_frames'] = 0
-                current_positions[moving_peg] = pos
-                unused_detections.remove(best_match_idx)
-                matched_pegs.add(moving_peg)
-        
-        # Match all pegs to detections (only update moving peg if one is set)
-        for peg_id in peg_ids:
-            if peg_id in matched_pegs:
-                continue
-                
-            best_match_idx = None
-            min_dist = float('inf')
-            
-            # Find the closest detection to this peg's last known position
-            for idx in unused_detections:
-                pos = points_3d[idx]
-                last_pos = self.pegs[peg_id]['position']
-                dist = np.linalg.norm(np.array(pos) - np.array(last_pos))
-                
-                if dist < self.movement_threshold * 5 and dist < min_dist:
-                    min_dist = dist
-                    best_match_idx = idx
-            
-            if best_match_idx is not None:
-                # Found a match for this peg
-                pos = points_3d[best_match_idx]
-                
-                # Only update position if it's a valid position
-                existing_positions = [p for pid, p in current_positions.items() if pid != peg_id]
-                if self._is_valid_peg_position(pos, existing_positions):
-                    # Check if this peg has moved significantly from its stable position
-                    if self.moving_peg_id is None and len(self.pegs[peg_id]['history']) > 0 and peg_id in self.stable_positions:
-                        movement = np.linalg.norm(np.array(pos) - np.array(self.stable_positions[peg_id]))
-                        if movement > self.movement_threshold * 1.5:
-                            # Only set as moving peg if no other peg is currently moving
-                            self.moving_peg_id = peg_id
-                            self.last_moving_peg_change = self.frame_count
-                    
-                    self.pegs[peg_id]['position'] = pos
-                    self.pegs[peg_id]['history'].append(pos)
-                    if len(self.pegs[peg_id]['history']) > self.position_history_length:
-                        self.pegs[peg_id]['history'].popleft()
-                    self.pegs[peg_id]['missing_frames'] = 0
-                    current_positions[peg_id] = pos
-                    unused_detections.remove(best_match_idx)
-                    matched_pegs.add(peg_id)
-        
-       # Aggressively reacquire lost pegs using global matching
-        if unused_detections:
-            lost_pegs = [pid for pid in self.pegs if pid not in current_positions]
-            detection_to_peg = {}
+    def _predict_all(self, dt):
+        for pid, st in self.pegs.items():
+            st['kf'].predict(dt)
 
-            for idx in unused_detections:
-                new_pos = points_3d[idx]
-                best_peg = None
-                best_dist = float('inf')
+    def _pick_token(self):
+        # speed-based hysteresis
+        moving = []
+        for pid, st in self.pegs.items():
+            speed = float(np.linalg.norm(st['kf'].vel()))
+            if speed > self.speed_on:
+                st['moving_frames'] += 1; st['static_frames'] = 0
+            else:
+                st['static_frames'] += 1; st['moving_frames'] = 0
+            if st['moving_frames'] >= self.token_on_frames:
+                moving.append(pid)
 
-                for peg_id in lost_pegs:
-                    last_pos = self.pegs[peg_id]['position']
-                    dist = np.linalg.norm(np.array(new_pos) - np.array(last_pos))
+        if self.moving_peg_id is None and len(moving) == 1 and (self.frame_count - self.last_moving_peg_change) > self.token_on_frames:
+            self.moving_peg_id = moving[0]
+            self.last_moving_peg_change = self.frame_count
 
-                    if dist < best_dist:
-                        best_dist = dist
-                        best_peg = peg_id
-
-                # Assign detection to best-matching lost peg
-                if best_peg is not None and best_peg not in detection_to_peg.values():
-                    detection_to_peg[idx] = best_peg
-
-            # Apply reacquisitions
-            for idx, peg_id in detection_to_peg.items():
-                new_pos = points_3d[idx]
-                self.pegs[peg_id]['position'] = new_pos
-                self.pegs[peg_id]['history'].append(new_pos)
-                self.pegs[peg_id]['missing_frames'] = 0
-                current_positions[peg_id] = new_pos
-                if idx in unused_detections:
-                    unused_detections.remove(idx)
-
-        # Handle any remaining detections (new pegs or lost pegs) - only if no moving peg
-        if self.moving_peg_id is None:
-            for idx in unused_detections:
-                pos = points_3d[idx]
-                
-                # Only add new pegs if we're below max_pegs and position is valid
-                if len(current_positions) < self.max_pegs and self._is_valid_peg_position(pos, current_positions.values()):
-                    if self.next_peg_id >= self.max_pegs:
-                        continue
-                    peg_id = self.next_peg_id
-                    self.pegs[peg_id] = {
-                        'position': pos,
-                        'history': deque([pos], maxlen=self.position_history_length),
-                        'missing_frames': 0
-                    }
-                    current_positions[peg_id] = pos
-                    self.next_peg_id += 1
-        
-        # Update stable positions if we have all pegs
-        if len(current_positions) == self.max_pegs:
-            self.stable_positions = {pid: data['position'] for pid, data in self.pegs.items()}
-        
-        # Check if we should be tracking a moving peg
-        if self.moving_peg_id is None:
-            # No moving peg - check if any peg is moving significantly
-            moving_peg = self._find_moving_peg(current_positions)
-            if moving_peg is not None and self.frame_count - self.last_moving_peg_change > self.moving_peg_cooldown:
-                self.moving_peg_id = moving_peg
+        if self.moving_peg_id is not None:
+            st = self.pegs[self.moving_peg_id]
+            if st['static_frames'] >= self.token_off_frames and np.linalg.norm(st['kf'].vel()) < self.speed_off:
+                # peg has settled; update stable pos and drop token
+                self.stable_positions[self.moving_peg_id] = tuple(st['kf'].pos())
+                self.moving_peg_id = None
                 self.last_moving_peg_change = self.frame_count
-        else:
-            # We have a moving peg - check if it has stopped moving
-            if self.moving_peg_id in current_positions and self.moving_peg_id in self.stable_positions:
-                movement = np.linalg.norm(
-                    np.array(current_positions[self.moving_peg_id]) - 
-                    np.array(self.stable_positions[self.moving_peg_id])
-                )
-                # If movement is very small for cooldown period, clear the moving peg
-                if movement < self.movement_threshold * 0.5:  
-                    if self.frame_count - self.last_moving_peg_change > self.moving_peg_cooldown:
-                        # Update stable position for this peg and clear moving_peg_id
-                        self.stable_positions[self.moving_peg_id] = current_positions[self.moving_peg_id]
-                        self.moving_peg_id = None
-                        # Reset the cooldown to allow immediate detection of new moving pegs
-                        self.last_moving_peg_change = self.frame_count
-        
+
+    def _associate(self, meas):
+        """
+        Associate measurements to tracks.
+        - Static pegs: tight gate to their predicted pos.
+        - Moving token (if any): wide gate.
+        Unique assignment enforced.
+        """
+        assigned = {}
+        used_meas = set()
+
+        # 1) Static pegs first (prevents swaps)
+        cand_list = []
+        for pid, st in self.pegs.items():
+            if pid == self.moving_peg_id: 
+                continue
+            p_pred = st['kf'].pos()
+            for j, m in enumerate(meas):
+                d = float(np.linalg.norm(p_pred - np.array(m)))
+                if d <= self.gate_static:
+                    cand_list.append((d, pid, j))
+        cand_list.sort(key=lambda t: t[0])
+        taken_pid = set()
+        for d, pid, j in cand_list:
+            if pid in taken_pid or j in used_meas: 
+                continue
+            assigned[pid] = j
+            taken_pid.add(pid)
+            used_meas.add(j)
+
+        # 2) Moving token (wider gate)
+        if self.moving_peg_id is not None:
+            pid = self.moving_peg_id
+            st = self.pegs[pid]
+            p_pred = st['kf'].pos()
+            best = None; bestd = 1e9; bestj = None
+            for j, m in enumerate(meas):
+                if j in used_meas: 
+                    continue
+                d = float(np.linalg.norm(p_pred - np.array(m)))
+                if d < bestd and d <= self.gate_moving:
+                    bestd = d; best = m; bestj = j
+            if bestj is not None:
+                assigned[pid] = bestj
+                used_meas.add(bestj)
+
+        return assigned
+
+    def _update_tracks(self, assigned, meas, tnow):
+        for pid, st in self.pegs.items():
+            if pid in assigned:
+                z = np.array(meas[assigned[pid]])
+                st['kf'].update(z)
+                st['missing_frames'] = 0
+            else:
+                st['missing_frames'] += 1
+                # If static and occluded, freeze at last published (prevents drift/glitch)
+                if pid != self.moving_peg_id and st['missing_frames'] <= self.max_missing_frames:
+                    z = np.array(st['position'])
+                    st['kf'].update(z.reshape(3))
+                # if moving and occluded, KF prediction carries it
+
+            # publish with smoothing + two-frame guard
+            sm = st['euro'].filter(st['kf'].pos(), tnow)
+            st['pub_buffer'].append(sm)
+            if len(st['pub_buffer']) >= 2:
+                a, b = st['pub_buffer'][-2], st['pub_buffer'][-1]
+                if np.linalg.norm(a - b) <= self.publish_guard_radius:
+                    st['position'] = tuple(b)
+            else:
+                st['position'] = tuple(sm)
+
+    # ------------------------------- public --------------------------------
+    def update(self, left_frame, right_frame):
+        # 1) detections (lowered conf a bit; small objects)
+        res_l = model(left_frame,  verbose=False, conf=0.10)[0]
+        res_r = model(right_frame, verbose=False, conf=0.10)[0]
+        left_pegs  = self.get_center(res_l)
+        right_pegs = self.get_center(res_r)
+
+        # 2) stereo pairing & triangulation
+        matched_left, matched_right = self.find_pairs(left_pegs, right_pegs)
+        points_3d = self.find_3d_points(matched_left, matched_right) if (matched_left and matched_right) else []
+
+        # 3) init if needed (deterministic)
+        if not self.initialized:
+            if self._init_tracks(points_3d):
+                return self._get_current_positions()  # immediately publish initialized
+            else:
+                return self._get_current_positions()  # may be empty until 6 seen
+
+        # 4) predict → associate → update
+        tnow = time.perf_counter()
+        dt = max(1e-3, tnow - self._t_prev)
+        self._t_prev = tnow
+
+        self._predict_all(dt)
+        self._pick_token()
+        assigned = self._associate(points_3d)
+        self._update_tracks(assigned, points_3d, tnow)
+
         self.frame_count += 1
-        
-        # Clean up pegs that have been missing for too long
-        missing_pegs = []
-        for peg_id in list(self.pegs.keys()):
-            if peg_id not in current_positions:
-                if self.pegs[peg_id]['missing_frames'] >= self.max_missing_frames:
-                    missing_pegs.append(peg_id)
-                else:
-                    self.pegs[peg_id]['missing_frames'] += 1
-                    # Always use current position when no peg is moving
-                    # When a peg is moving, only use current position for that peg
-                    if self.moving_peg_id is None or peg_id == self.moving_peg_id:
-                        current_positions[peg_id] = self.pegs[peg_id]['position']
-                    elif peg_id in self.stable_positions:
-                        current_positions[peg_id] = self.stable_positions[peg_id]
-        
-        # Remove missing pegs
-        for peg_id in missing_pegs:
-            if peg_id not in current_positions and peg_id in self.pegs:
-                current_positions[peg_id] = self.pegs[peg_id]['position']
-        
-        # If we have a moving peg but it's not in current positions, clear it
-        if self.moving_peg_id is not None and self.moving_peg_id not in current_positions:
-            self.moving_peg_id = None
-        
-        return current_positions
-    
+        return self._get_current_positions()
+
     def _get_current_positions(self):
-        return {pid: data['position'] for pid, data in self.pegs.items()}
+        return {pid: tuple(map(float, st['position'])) for pid, st in self.pegs.items()}
 
 def transform_pegs(pegs):
     """Transform 3D points from camera coordinates to world coordinates."""
