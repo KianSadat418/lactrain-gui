@@ -106,9 +106,9 @@ class PegStereoMatcher:
         self.max_missing_frames = 30
 
         # new, derived thresholds (tuned for your scale)
-        self.gate_static = self.movement_threshold * 6.0    # ~15
-        self.gate_moving = self.movement_threshold * 20.0   # ~50
-        self.publish_guard_radius = 5.0                     # mm-ish
+        self.gate_static = self.movement_threshold * 5.0    # ~15
+        self.gate_moving = self.movement_threshold * 25.0   # ~50
+        self.publish_guard_radius = 10.0                     # mm-ish
         self.speed_on  = 0.020   # m/s-ish in your units (we only compare relative)
         self.speed_off = 0.010
         self.token_on_frames  = 3
