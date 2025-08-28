@@ -199,7 +199,7 @@ class Peg3DTrackerKF:
         self.next_id = 0
         self.last_ts = None
         self.missed_threshold = 150  # frames allowed missing (occlusion tolerance)
-        self.mahal_gate = 12.0       # ~chi2_3(0.999)
+        self.mahal_gate = 14.0       # ~chi2_3(0.999)
         self.stationary_q = 0.25      # process noise scale when not moving
         self.moving_q = 8.0          # higher process noise for moving peg
         self.speed_thresh = 4.0      # mm/frame, tune per FPS
