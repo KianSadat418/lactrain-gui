@@ -17,7 +17,8 @@ os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'  # Enable OpenEXR support in OpenCV
 CHUNK_SIZE = 30000
 UNITY_LEFT_PORT = 9998
 UNITY_RIGHT_PORT = 9999
-OUTPUT_PORT = 9989
+OUTPUT_PORT_JSON = 9989         # <- unchanged: positions JSON (Unity already listens here)
+OUTPUT_PORT_MOVE = 9990         # <- NEW: moving-peg control channel (separate port)
 OUTPUT_IP = "127.0.0.1"
 
 # =====================
@@ -38,7 +39,8 @@ R1, R2, P1, P2, Q, _, _ = cv2.stereoRectify(K1, D1, K2, D2, image_size, R, T, al
 # =====================
 # UDP sockets
 # =====================
-output_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock_json = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # positions JSON
+sock_move = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # moving-peg control
 left_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 right_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -107,13 +109,12 @@ def pair_stereo(left_pts, right_pts, y_tol=6.0, z_min=0.0, z_max=220.0):
     """Return 3D points from robust bipartite y-matching with gating on y and depth."""
     if len(left_pts) == 0 or len(right_pts) == 0:
         return []
-    # Build cost matrix on |dy|
     L, Rn = len(left_pts), len(right_pts)
     cost = np.full((L, Rn), 1e6, dtype=np.float32)
     for i, (xl, yl) in enumerate(left_pts):
         for j, (xr, yr) in enumerate(right_pts):
             dy = abs(yl - yr)
-            if dy <= y_tol and (xr - xl) < 0:  # disparity must be positive if cameras are rectified L|R (assumes R image is to the right)
+            if dy <= y_tol and (xr - xl) < 0:  # positive disparity
                 cost[i, j] = dy
     row_ind, col_ind = linear_sum_assignment(cost)
     pairs = []
@@ -130,7 +131,7 @@ def pair_stereo(left_pts, right_pts, y_tol=6.0, z_min=0.0, z_max=220.0):
     return pts_valid
 
 # =====================
-# 3D Kalman Track
+# 3D Kalman Track (ORIGINAL)
 # =====================
 
 class KFTrack:
@@ -138,11 +139,10 @@ class KFTrack:
         self.id = track_id
         self.dim_x = 6
         self.dim_z = 3
-        # state [x y z vx vy vz]
         self.x = np.zeros((6, 1), dtype=np.float32)
         self.x[:3, 0] = np.array(x0, dtype=np.float32)
         self.x[3:, 0] = np.array(init_vel, dtype=np.float32)
-        self.P = np.eye(6, dtype=np.float32) * 50.0  # large init uncertainty
+        self.P = np.eye(6, dtype=np.float32) * 50.0
         self.F = np.eye(6, dtype=np.float32)
         self.H = np.zeros((3, 6), dtype=np.float32)
         self.H[0, 0] = self.H[1, 1] = self.H[2, 2] = 1.0
@@ -153,10 +153,7 @@ class KFTrack:
         self.is_moving = False
 
     def predict(self, dt, q_scale=1.0):
-        # Update F for dt
-        self.F[0, 3] = dt
-        self.F[1, 4] = dt
-        self.F[2, 5] = dt
+        self.F[0, 3] = dt; self.F[1, 4] = dt; self.F[2, 5] = dt
         self.x = (self.F @ self.x).astype(np.float32)
         Q = (self.Q_base * float(q_scale)).astype(np.float32)
         self.P = (self.F @ self.P @ self.F.T + Q).astype(np.float32)
@@ -188,7 +185,7 @@ class KFTrack:
         return self.x[3:, 0].copy()
 
 # =====================
-# Peg tracker using 3D KF + GNN assignment + occlusion handling
+# Peg tracker (ORIGINAL)
 # =====================
 
 class Peg3DTrackerKF:
@@ -198,16 +195,13 @@ class Peg3DTrackerKF:
         self.initialized = False
         self.next_id = 0
         self.last_ts = None
-        self.missed_threshold = 150  # frames allowed missing (occlusion tolerance)
-        self.mahal_gate = 14.0       # ~chi2_3(0.999)
-        self.stationary_q = 0.25      # process noise scale when not moving
-        self.moving_q = 8.0          # higher process noise for moving peg
-        self.speed_thresh = 4.0      # mm/frame, tune per FPS
+        self.missed_threshold = 150
+        self.mahal_gate = 14.0
+        self.stationary_q = 0.2
+        self.moving_q = 10.0
+        self.speed_thresh = 4.0
         self.moving_id = None
 
-    # -----------------
-    # Stereo & 3D input
-    # -----------------
     def yolo_stereo_to_3d(self, left_frame, right_frame):
         res_l = model(left_frame, verbose=False)[0]
         res_r = model(right_frame, verbose=False)[0]
@@ -216,50 +210,36 @@ class Peg3DTrackerKF:
         pts3d = pair_stereo(L, R)
         return pts3d
 
-    # -----------------
-    # Public update
-    # -----------------
     def update(self, left_frame, right_frame):
         now = time.time()
         if self.last_ts is None:
             dt = 1/30.0
         else:
-            dt = max(1/120.0, min(1/15.0, now - self.last_ts))  # clamp for stability
+            dt = max(1/120.0, min(1/15.0, now - self.last_ts))
         self.last_ts = now
 
         detections = self.yolo_stereo_to_3d(left_frame, right_frame)
 
-        # 1) If we have fewer than max tracks, try to bootstrap
         if not self.initialized and len(detections) >= self.max_pegs:
-            # choose the best 6 (closest to median depth) for stability
-            Z = np.array([d[2] for d in detections])
-            med = np.median(Z)
+            Z = np.array([d[2] for d in detections]); med = np.median(Z)
             idx = np.argsort(np.abs(Z - med))[:self.max_pegs]
-            init_pts = [detections[i] for i in idx]
-            # deterministic ID assignment: left-to-right by X
-            init_pts_sorted = sorted(init_pts, key=lambda p: p[0])
+            init_pts_sorted = sorted([detections[i] for i in idx], key=lambda p: p[0])
             for k, p in enumerate(init_pts_sorted):
-                tr = KFTrack(k, p)
-                self.tracks[k] = tr
+                self.tracks[k] = KFTrack(k, p)
             self.next_id = self.max_pegs
             self.initialized = True
             self.moving_id = None
 
-        # Predict all tracks
         for tid, tr in self.tracks.items():
             q = self.moving_q if (self.moving_id == tid) else self.stationary_q
             tr.predict(dt, q_scale=q)
 
-        # Early out: if no detections, just return predicted
         if len(detections) == 0:
-            for tr in self.tracks.values():
-                tr.missing += 1
+            for tr in self.tracks.values(): tr.missing += 1
             return {tid: tr.pos for tid, tr in self.tracks.items()}
 
-        # 2) Build cost matrix (tracks x detections) with gating
         track_ids = list(self.tracks.keys())
         if len(track_ids) == 0 and self.initialized:
-            # shouldn't happen, but guard
             return {}
 
         cost = np.full((len(track_ids), len(detections)), 1e6, dtype=np.float32)
@@ -270,65 +250,90 @@ class Peg3DTrackerKF:
                 if m <= self.mahal_gate:
                     cost[i, j] = m
 
-        # Hungarian assignment
         row_ind, col_ind = linear_sum_assignment(cost)
-        assigned_tr = set()
-        assigned_det = set()
-
-        # 3) Update matched tracks
+        assigned_tr, assigned_det = set(), set()
         for ri, ci in zip(row_ind, col_ind):
             if cost[ri, ci] < 1e6 and cost[ri, ci] <= self.mahal_gate:
                 tid = track_ids[ri]
                 self.tracks[tid].update(detections[ci])
-                assigned_tr.add(tid)
-                assigned_det.add(ci)
+                assigned_tr.add(tid); assigned_det.add(ci)
 
-        # 4) Unmatched tracks: keep predicting, increment missing
         for tid in track_ids:
             if tid not in assigned_tr:
                 self.tracks[tid].missing += 1
 
-        # 5) (Optional) If not fully initialized yet, create new tracks up to 6
         if not self.initialized:
             for j, det in enumerate(detections):
-                if j in assigned_det:
-                    continue
+                if j in assigned_det: continue
                 tid = self.next_id
-                tr = KFTrack(tid, det)
-                self.tracks[tid] = tr
+                self.tracks[tid] = KFTrack(tid, det)
                 self.next_id += 1
                 if len(self.tracks) >= self.max_pegs:
-                    # lock to exactly 6 by picking most reliable (lowest P trace)
                     if len(self.tracks) > self.max_pegs:
-                        # drop worst
                         srt = sorted(self.tracks.items(), key=lambda kv: np.trace(kv[1].P))
-                        keep = dict(srt[:self.max_pegs])
-                        self.tracks = keep
+                        self.tracks = dict(srt[:self.max_pegs])
                         self.next_id = max(self.tracks.keys()) + 1
                     self.initialized = True
                     break
 
-        # 6) Never re-ID: we do NOT create new IDs after initialization; ignore extra detections
-
-        # 7) Determine moving peg based on speed (one-at-a-time prior)
         if self.initialized and len(self.tracks) == self.max_pegs:
             speeds = {tid: float(np.linalg.norm(tr.vel)) for tid, tr in self.tracks.items()}
             if len(speeds) > 0:
                 cand_id = max(speeds, key=lambda k: speeds[k])
                 cand_speed = speeds[cand_id]
-                others = [v for k, v in speeds.items() if k != cand_id]
-                second = max(others) if others else 0.0
+                second = max([v for k, v in speeds.items() if k != cand_id], default=0.0)
                 if cand_speed > self.speed_thresh and cand_speed > 2.0 * second:
                     self.moving_id = cand_id
                 elif second > 0 and cand_speed <= 1.5 * second:
-                    # nobody clearly moving
                     self.moving_id = None
 
-        # 8) Prune nothing: keep tracks alive for long occlusions
-        # If a track has been missing way too long, we still DO NOT delete it; we keep predicting to preserve ID stability.
-        # (If you truly need pruning, lower self.missed_threshold and re-init carefully.)
-
         return {tid: tr.pos for tid, tr in self.tracks.items()}
+
+# =====================
+# NEW: external moving-peg detector (side-band only)
+# =====================
+
+class MovingPegDetector:
+    """Reads peg positions per frame, outputs sticky moving peg id. Does NOT change JSON."""
+    def __init__(self, alpha=0.35, moving_on_thresh=40.0, margin=1.8, min_hold_frames=8, confirm_frames=3):
+        self.alpha = float(alpha)
+        self.moving_on_thresh = float(moving_on_thresh)
+        self.margin = float(margin)
+        self.min_hold_frames = int(min_hold_frames)
+        self.confirm_frames = int(confirm_frames)
+        self.prev_pos = {}
+        self.speed_ema = {}
+        self.cand_count = {}
+        self.moving_id = None
+        self.frame_idx = 0
+        self.last_switch = -10**9
+
+    def update(self, positions_dict, dt):
+        self.frame_idx += 1
+        if dt <= 0: dt = 1e-3
+        speeds = {}
+        for pid, pos in positions_dict.items():
+            p = np.array(pos, dtype=np.float32)
+            v_inst = float(np.linalg.norm(p - self.prev_pos.get(pid, p)) / dt)
+            ema = self.alpha * v_inst + (1.0 - self.alpha) * self.speed_ema.get(pid, 0.0)
+            self.speed_ema[pid] = ema; self.prev_pos[pid] = p; speeds[pid] = ema
+        if not speeds: return self.moving_id
+        cand = max(speeds, key=lambda k: speeds[k])
+        cand_speed = speeds[cand]
+        second = max([v for k, v in speeds.items() if k != cand], default=0.0)
+        self.cand_count[cand] = self.cand_count.get(cand, 0) + 1
+        for k in list(self.cand_count.keys()):
+            if k != cand: self.cand_count[k] = 0
+        if self.moving_id is None:
+            if cand_speed > self.moving_on_thresh and cand_speed > self.margin * second:
+                if self.cand_count[cand] >= self.confirm_frames:
+                    self.moving_id = cand; self.last_switch = self.frame_idx
+        else:
+            if cand != self.moving_id and (self.frame_idx - self.last_switch) >= self.min_hold_frames:
+                if cand_speed > self.moving_on_thresh and cand_speed > self.margin * second:
+                    if self.cand_count[cand] >= self.confirm_frames:
+                        self.moving_id = cand; self.last_switch = self.frame_idx
+        return self.moving_id
 
 # =====================
 # Main loop
@@ -336,17 +341,25 @@ class Peg3DTrackerKF:
 
 if __name__ == "__main__":
     try:
-        # Init rectification maps
         map1x, map1y = cv2.initUndistortRectifyMap(K1, D1, R1, P1, image_size, cv2.CV_32FC1)
         map2x, map2y = cv2.initUndistortRectifyMap(K2, D2, R2, P2, image_size, cv2.CV_32FC1)
 
         tracker = Peg3DTrackerKF(max_pegs=6)
+        mover = MovingPegDetector(moving_on_thresh=30.0, margin=1.8, min_hold_frames=8, confirm_frames=3)
+
         frame_count = 0
+        last_send_m = None
+        prev_time = time.time()
 
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
+
+            # dt for moving-peg detector
+            now_time = time.time()
+            dt_loop = max(1e-3, now_time - prev_time)
+            prev_time = now_time
 
             # Split and rectify
             left_raw = frame[:, :800]
@@ -354,37 +367,45 @@ if __name__ == "__main__":
             left_frame = cv2.remap(left_raw, map1x, map1y, cv2.INTER_LINEAR)
             right_frame = cv2.remap(right_raw, map2x, map2y, cv2.INTER_LINEAR)
 
-            # Send frames to Unity
+            # Send frames (unchanged)
             send_frame(left_sock, left_frame, UNITY_LEFT_PORT, frame_count)
             send_frame(right_sock, right_frame, UNITY_RIGHT_PORT, frame_count)
 
-            # Update tracker
+            # Update tracker (unchanged)
             peg_positions_cam = tracker.update(left_frame, right_frame)
 
-            # Assemble message (always 6 IDs 1..6). If not yet initialized or missing, use predicted.
+            # Moving-peg (side-band only)
+            moving_id = mover.update(peg_positions_cam, dt_loop)  # 0..5 or None
+
+            # Build JSON exactly as Unity expects
             message = {}
             for peg_id in range(6):
                 if peg_id in peg_positions_cam:
                     x, y, z = peg_positions_cam[peg_id]
                 else:
-                    # If track not yet created, default to origin (rare after init)
                     x, y, z = 0.0, 0.0, 0.0
-                # Transform to world
                 try:
                     Xw, Yw, Zw = transform_pegs_world([(x, y, z)])[0]
-                    message[str(peg_id + 1)] = {
-                        "x": round(float(Xw), 3),
-                        "y": round(float(Yw), 3),
-                        "z": round(float(Zw), 3)
-                    }
+                    message[str(peg_id + 1)] = {"x": round(float(Xw), 3),
+                                                "y": round(float(Yw), 3),
+                                                "z": round(float(Zw), 3)}
                 except Exception:
                     message[str(peg_id + 1)] = {"x": 0.0, "y": 0.0, "z": 0.0}
 
-            # Send to Unity
+            # Send positions JSON (unchanged channel/format)
             try:
-                output_socket.sendto(json.dumps(message).encode('utf-8'), (OUTPUT_IP, OUTPUT_PORT))
+                sock_json.sendto(json.dumps(message).encode('utf-8'), (OUTPUT_IP, OUTPUT_PORT_JSON))
             except Exception as e:
-                print(f"Error sending message: {e}")
+                print(f"[Python] Error sending JSON: {e}")
+
+            # Send moving-peg packet on a DIFFERENT port
+            try:
+                moving_to_send = 0 if moving_id is None else (moving_id + 1)
+                if moving_to_send != last_send_m:
+                    sock_move.sendto(f"M{moving_to_send}".encode('utf-8'), (OUTPUT_IP, OUTPUT_PORT_MOVE))
+                    last_send_m = moving_to_send
+            except Exception as e:
+                print(f"[Python] Error sending moving peg: {e}")
 
             frame_count += 1
             if (cv2.waitKey(1) & 0xFF) == ord('q'):
@@ -394,7 +415,8 @@ if __name__ == "__main__":
         print("Stopping...")
     finally:
         cap.release()
-        output_socket.close()
+        sock_json.close()
+        sock_move.close()
         left_sock.close()
         right_sock.close()
         cv2.destroyAllWindows()
